@@ -8,7 +8,6 @@ export default function LoginPage() {
   const [formData, setFormData] = useState({
     email: '',
     password: '',
-    role: 'patient' as 'patient' | 'donor' | 'admin',
   });
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -18,44 +17,23 @@ export default function LoginPage() {
     setError(null);
     setLoading(true);
 
-    // For now, just log the data and navigate to dashboard
-    console.log('Login data:', formData);
-
     try {
       const loginRes = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: formData.email, password: formData.password }),
+        body: JSON.stringify(formData),
       });
 
       if (loginRes.ok) {
         const data = await loginRes.json();
         localStorage.setItem('token', data.token);
         localStorage.setItem('role', data.user.role);
+        localStorage.setItem('user', JSON.stringify(data.user));
         router.replace(`/dashboard/${data.user.role}`);
         return;
       }
 
-      if (loginRes.status === 401 || loginRes.status === 404) {
-        const registerRes = await fetch('/api/auth/register', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(formData),
-        });
-
-        if (!registerRes.ok) {
-          const data = await registerRes.json();
-          throw new Error(data.error || 'Registration failed');
-        }
-
-        const data = await registerRes.json();
-        localStorage.setItem('token', data.token);
-        localStorage.setItem('role', data.user.role);
-        router.replace(`/dashboard/${data.user.role}`);
-        return;
-      }
-
-      const loginData = await loginRes.json();
+      const loginData = await loginRes.json().catch(() => ({}));
       throw new Error(loginData.error || 'Invalid credentials');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unexpected auth error');
@@ -64,7 +42,7 @@ export default function LoginPage() {
     }
   };
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setFormData(prev => ({
       ...prev,
       [e.target.name]: e.target.value,
@@ -112,37 +90,18 @@ export default function LoginPage() {
             />
           </div>
 
-          <div>
-            <label htmlFor="role" className="block text-sm font-medium text-gray-700 mb-2">
-              I am a
-            </label>
-            <select
-              id="role"
-              name="role"
-              value={formData.role}
-              onChange={handleChange}
-              className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-red focus:border-red transition-colors"
-            >
-              <option value="patient">Patient</option>
-              <option value="donor">Blood Donor</option>
-              <option value="admin">Administrator</option>
-            </select>
-          </div>
-
           <button
             type="submit"
             className="w-full bg-red hover:bg-red-dark text-white font-semibold py-3 px-4 rounded-xl transition-colors shadow-lg shadow-red/25 hover:shadow-xl hover:shadow-red/35"
             disabled={loading}
           >
-            Sign In
+            {loading ? 'Authenticating...' : 'Sign In'}
           </button>
         </form>
 
-        {error && <p className="mt-4 text-sm text-red">{error}</p>}
+        {error && <p className="mt-4 text-sm text-center text-red bg-red/10 py-2 rounded-lg">{error}</p>}
 
-        {loading && <p className="mt-4 text-sm text-gray-600">Authenticating...</p>}
-
-        <div className="mt-6 text-center">
+        <div className="mt-6 text-center border-t border-gray-100 pt-6">
           <p className="text-sm text-gray-600">
             Don&apos;t have an account?{' '}
             <button

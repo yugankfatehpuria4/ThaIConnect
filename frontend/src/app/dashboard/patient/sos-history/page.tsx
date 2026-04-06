@@ -6,7 +6,7 @@ type SOSAlert = {
   _id: string;
   bloodGroupRequired: string;
   hospital: string;
-  status: 'pending' | 'accepted' | 'resolved';
+  status: 'pending' | 'accepted' | 'resolved' | 'active' | 'expired' | string;
   createdAt: string;
   patientId?: { name?: string; bloodGroup?: string } | null;
 };
@@ -21,8 +21,20 @@ const mockAlerts: SOSAlert[] = [
 const statusConfig = {
   pending: { label: 'Pending', chipClass: 'chip-amber', icon: <Clock size={12} /> },
   accepted: { label: 'Accepted', chipClass: 'chip-blue', icon: <CheckCircle2 size={12} /> },
+  active: { label: 'Active', chipClass: 'chip-amber', icon: <Clock size={12} /> },
   resolved: { label: 'Resolved', chipClass: 'chip-green', icon: <CheckCircle2 size={12} /> },
+  expired: { label: 'Expired', chipClass: 'chip-red', icon: <AlertCircle size={12} /> },
 };
+
+const fallbackStatusConfig = { label: 'Unknown', chipClass: 'chip-gray', icon: <Clock size={12} /> };
+
+function normalizeStatus(status: unknown): string {
+  if (typeof status !== 'string') return 'pending';
+  const value = status.toLowerCase();
+  if (value === 'active') return 'pending';
+  if (value === 'rejected' || value === 'declined') return 'expired';
+  return value;
+}
 
 export default function SOSHistoryPage() {
   const [alerts, setAlerts] = useState<SOSAlert[]>(mockAlerts);
@@ -33,7 +45,17 @@ export default function SOSHistoryPage() {
     fetch('/api/sos')
       .then(res => res.json())
       .then(data => {
-        if (Array.isArray(data) && data.length > 0) setAlerts(data);
+        if (Array.isArray(data) && data.length > 0) {
+          const normalizedAlerts: SOSAlert[] = data.map((item: any) => ({
+            _id: String(item._id),
+            bloodGroupRequired: String(item.bloodGroupRequired || item.bloodGroup || item.patientId?.bloodGroup || 'N/A'),
+            hospital: String(item.hospital || 'Unknown Hospital'),
+            status: normalizeStatus(item.status),
+            createdAt: item.createdAt || new Date().toISOString(),
+            patientId: item.patientId || null,
+          }));
+          setAlerts(normalizedAlerts);
+        }
       })
       .catch(console.error)
       .finally(() => setLoading(false));
@@ -56,19 +78,19 @@ export default function SOSHistoryPage() {
 
       {/* Stats */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="bg-white border border-gray-100 rounded-[12px] p-4">
+        <div className="bg-white border border-gray-100 rounded-sm p-4">
           <div className="text-2xl font-bold text-gray-800">{stats.total}</div>
           <div className="text-xs text-gray-400 font-medium">Total SOS Alerts</div>
         </div>
-        <div className="bg-white border border-gray-100 rounded-[12px] p-4">
+        <div className="bg-white border border-gray-100 rounded-sm p-4">
           <div className="text-2xl font-bold text-green">{stats.resolved}</div>
           <div className="text-xs text-gray-400 font-medium">Resolved</div>
         </div>
-        <div className="bg-white border border-gray-100 rounded-[12px] p-4">
+        <div className="bg-white border border-gray-100 rounded-sm p-4">
           <div className="text-2xl font-bold text-amber">{stats.pending}</div>
           <div className="text-xs text-gray-400 font-medium">Pending</div>
         </div>
-        <div className="bg-white border border-gray-100 rounded-[12px] p-4">
+        <div className="bg-white border border-gray-100 rounded-sm p-4">
           <div className="text-2xl font-bold text-blue">{stats.avgResponse}</div>
           <div className="text-xs text-gray-400 font-medium">Avg. Response Time</div>
         </div>
@@ -83,7 +105,7 @@ export default function SOSHistoryPage() {
       ) : (
         <div className="flex flex-col gap-3">
           {alerts.map(alert => {
-            const config = statusConfig[alert.status];
+            const config = statusConfig[alert.status as keyof typeof statusConfig] || fallbackStatusConfig;
             const isExpanded = expanded === alert._id;
             return (
               <div key={alert._id} className="card hover:shadow-md transition-shadow">

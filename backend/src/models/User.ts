@@ -2,6 +2,8 @@ import mongoose, { Schema, Document } from 'mongoose';
 
 export interface IUser extends Document {
   name: string;
+  email?: string;
+  password?: string;
   role: 'patient' | 'donor' | 'admin';
   bloodGroup?: string;
   location?: {
@@ -24,7 +26,7 @@ const UserSchema: Schema = new Schema({
   bloodGroup: { type: String },
   location: {
     type: { type: String, enum: ['Point'], default: 'Point' },
-    coordinates: { type: [Number], index: '2dsphere' }
+    coordinates: { type: [Number], index: '2dsphere', default: [77.2090, 28.6139] }
   },
   distance: { type: Number, default: 0 },
   lastDonated: { type: Date },

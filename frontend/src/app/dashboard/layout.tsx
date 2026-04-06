@@ -6,6 +6,7 @@
 import Sidebar from '@/components/Sidebar';
 import Topbar from '@/components/Topbar';
 import SOSModal from '@/components/SOSModal';
+import { SocketProvider } from '@/context/SocketContext';
 
 type UserRole = 'patient' | 'donor' | 'admin';
 
@@ -50,15 +51,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   };
 
   return (
-    <div className="flex w-full">
-      <Sidebar role={role} />
-      <div className="ml-55 flex-1 flex flex-col min-h-screen">
-        <Topbar title={getTitle()} onSOSClick={() => setSosOpen(true)} />
-        <main className="p-7 flex-1">
-          {children}
-        </main>
+    <SocketProvider>
+      <div className="flex w-full">
+        <Sidebar role={role} />
+        <div className="ml-55 flex-1 flex flex-col min-h-screen">
+          <Topbar title={getTitle()} onSOSClickAction={() => setSosOpen(true)} />
+          <main className="p-7 flex-1">
+            {children}
+          </main>
+        </div>
+        <SOSModal isOpen={sosOpen} onCloseAction={() => setSosOpen(false)} />
       </div>
-      <SOSModal isOpen={sosOpen} onClose={() => setSosOpen(false)} />
-    </div>
+    </SocketProvider>
   );
 }

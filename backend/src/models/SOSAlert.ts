@@ -2,26 +2,71 @@ import mongoose, { Schema, Document } from 'mongoose';
 
 export interface ISOSAlert extends Document {
   patientId: mongoose.Types.ObjectId;
-  bloodGroupRequired: string;
+  bloodGroup: string;
   location: {
     type: string;
     coordinates: number[];
   };
-  hospital: string;
-  status: 'pending' | 'accepted' | 'resolved';
+  hospital?: string;
+  status: 'active' | 'resolved' | 'expired';
+  responders: {
+    donorId: mongoose.Types.ObjectId;
+    response: 'accepted' | 'rejected';
+    respondedAt: Date;
+  }[];
+  acceptedDonor?: mongoose.Types.ObjectId;
+  targetedDonor?: mongoose.Types.ObjectId;
+  requestType: 'sos' | 'direct';
+  deliveryLogs: {
+    channel: 'socket' | 'email';
+    recipientUserId?: mongoose.Types.ObjectId;
+    recipientEmail?: string;
+    event: string;
+    status: 'sent' | 'failed' | 'skipped';
+    reason?: string;
+    createdAt: Date;
+  }[];
+  expiresAt: Date;
   createdAt: Date;
+  updatedAt: Date;
 }
 
-const SOSAlertSchema: Schema = new Schema({
-  patientId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
-  bloodGroupRequired: { type: String, required: true },
-  location: {
-    type: { type: String, enum: ['Point'], default: 'Point' },
-    coordinates: { type: [Number], required: true }
+const sosSchema: Schema = new Schema(
+  {
+    patientId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    bloodGroup: { type: String, required: true },
+    location: {
+      type: { type: String, enum: ['Point'], default: 'Point' },
+      coordinates: { type: [Number], required: true }
+    },
+    hospital: { type: String },
+    status: { type: String, enum: ['active', 'resolved', 'expired'], default: 'active' },
+    responders: [
+      {
+        donorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        response: { type: String, enum: ['accepted', 'rejected'] },
+        respondedAt: { type: Date, default: Date.now }
+      }
+    ],
+    acceptedDonor: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    targetedDonor: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    requestType: { type: String, enum: ['sos', 'direct'], default: 'sos' },
+    deliveryLogs: [
+      {
+        channel: { type: String, enum: ['socket', 'email'], required: true },
+        recipientUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        recipientEmail: { type: String },
+        event: { type: String, required: true },
+        status: { type: String, enum: ['sent', 'failed', 'skipped'], required: true },
+        reason: { type: String },
+        createdAt: { type: Date, default: Date.now },
+      }
+    ],
+    expiresAt: { type: Date, default: () => new Date(Date.now() + 10 * 60 * 1000) } // 10 minutes
   },
-  hospital: { type: String, required: true },
-  status: { type: String, enum: ['pending', 'accepted', 'resolved'], default: 'pending' },
-  createdAt: { type: Date, default: Date.now }
-});
+  { timestamps: true }
+);
 
-export default mongoose.model<ISOSAlert>('SOSAlert', SOSAlertSchema);
+sosSchema.index({ location: '2dsphere' });
+
+export default mongoose.model<ISOSAlert>('SOSAlert', sosSchema);

@@ -3,12 +3,17 @@ import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { AlertCircle, CheckCircle2, ChevronRight, X } from 'lucide-react';
 
-export default function SOSModal({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }) {
+type SOSModalProps = {
+  isOpen: boolean;
+  onCloseAction: () => void;
+};
+
+export default function SOSModal({ isOpen, onCloseAction }: SOSModalProps) {
   const [step, setStep] = useState(0);
 
   const nextStep = () => {
     if (step >= 2) {
-      onClose();
+      onCloseAction();
       setTimeout(() => setStep(0), 300);
       return;
     }
@@ -16,7 +21,7 @@ export default function SOSModal({ isOpen, onClose }: { isOpen: boolean, onClose
   };
 
   const cancel = () => {
-    onClose();
+    onCloseAction();
     setTimeout(() => setStep(0), 300);
   };
 

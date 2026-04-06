@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { Users, ShieldCheck, Clock, Activity, Wand2 } from 'lucide-react';
 
 const posts = {
@@ -8,10 +8,12 @@ const posts = {
   whatsapp: '🙏 Dear friend,\n\nA thalassemia patient near you needs B+ blood urgently.\n\nDonating takes only 30 minutes and can save a life. If you are eligible, please register on ThalAI Connect.\n\nThank you for caring. ❤️'
 };
 
+type PlatformType = keyof typeof posts;
+
 export default function AdminDashboard() {
-  const [platform, setPlatform] = useState<'instagram' | 'twitter' | 'whatsapp'>('instagram');
+  const [platform, setPlatform] = useState<PlatformType>('instagram');
   const [loading, setLoading] = useState(false);
-  const [dbUsers, setDbUsers] = useState<any[]>([]);
+  const [dbUsers, setDbUsers] = useState<Array<Record<string, unknown>>>([]);
 
   useEffect(() => {
     fetch('/api/donors')
@@ -51,12 +53,12 @@ export default function AdminDashboard() {
                   {dbUsers.length > 0 ? (
                     dbUsers.map((u, i) => (
                       <UserRow 
-                        key={u._id || i} 
-                        name={u.name || 'Unknown'} 
-                        id={String(u._id || '0000').slice(-4)} 
-                        role={u.role ? u.role.charAt(0).toUpperCase() + u.role.slice(1) : 'Donor'} 
+                        key={String(u._id || i)} 
+                        name={String(u.name || 'Unknown')} 
+                        id={String((u._id as string) || '0000').slice(-4)} 
+                        role={u.role && typeof u.role === 'string' ? u.role.charAt(0).toUpperCase() + u.role.slice(1) : 'Donor'} 
                         color={u.role === 'patient' ? 'amber' : 'blue'} 
-                        bg={u.bloodGroup || 'N/A'} 
+                        bg={String(u.bloodGroup || 'N/A')} 
                         loc="India" 
                       />
                     ))
@@ -75,13 +77,13 @@ export default function AdminDashboard() {
 
         <div className="flex flex-col gap-5">
            <div className="card-sm">
-             <h2 className="card-title mb-4">Campaign Generator <span className="text-[9px] bg-red text-white px-1.5 py-0.5 rounded-sm ml-1 relative top-[-2px]">AI</span></h2>
+             <h2 className="card-title mb-4">Campaign Generator <span className="text-[9px] bg-red text-white px-1.5 py-0.5 rounded-sm ml-1 relative -top-0.5">AI</span></h2>
              <div className="flex gap-2 mb-3 flex-wrap">
                <PlatformTab active={platform} type="instagram" onClick={setPlatform} label="Instagram" />
                <PlatformTab active={platform} type="twitter" onClick={setPlatform} label="Twitter/X" />
                <PlatformTab active={platform} type="whatsapp" onClick={setPlatform} label="WhatsApp" />
              </div>
-             <div className="bg-gray-50 border border-dashed border-gray-200 rounded-xl p-4 min-h-[120px] text-[13px] leading-relaxed text-gray-600 whitespace-pre-wrap">
+             <div className="bg-gray-50 border border-dashed border-gray-200 rounded-xl p-4 min-h-30 text-[13px] leading-relaxed text-gray-600 whitespace-pre-wrap">
                {loading ? (
                  <div className="typing mt-2"><span></span><span></span><span></span></div>
                ) : (
@@ -108,7 +110,7 @@ export default function AdminDashboard() {
   );
 }
 
-function UserRow({name, id, role, color, bg, loc}: any) {
+function UserRow({name, id, role, color, bg, loc}: { name: string; id: string; role: string; color: string; bg: string; loc: string }) {
   return (
     <tr className="border-b border-gray-50 hover:bg-gray-50/50">
       <td className="py-3"><strong>{name}</strong><br/><span className="text-[11px] text-gray-400">ID: #{id}</span></td>
@@ -123,7 +125,14 @@ function UserRow({name, id, role, color, bg, loc}: any) {
   );
 }
 
-function PlatformTab({active, type, onClick, label}: any) {
+type PlatformTabProps = {
+  active: PlatformType;
+  type: PlatformType;
+  onClick: Dispatch<SetStateAction<PlatformType>>;
+  label: string;
+};
+
+function PlatformTab({active, type, onClick, label}: PlatformTabProps) {
   return (
     <button onClick={() => onClick(type)} className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${active === type ? 'bg-red text-white border-red' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}>
       {label}
@@ -131,7 +140,15 @@ function PlatformTab({active, type, onClick, label}: any) {
   );
 }
 
-function HealthBar({label, val, pct, color, valColor}: any) {
+type HealthBarProps = {
+  label: string;
+  val: string;
+  pct: string;
+  color: string;
+  valColor: string;
+};
+
+function HealthBar({label, val, pct, color, valColor}: HealthBarProps) {
   return (
     <div>
       <div className="flex justify-between text-[12px] mb-1">
@@ -145,10 +162,19 @@ function HealthBar({label, val, pct, color, valColor}: any) {
   );
 }
 
-function StatCard({ icon, color, val, label, change, changeColor }: any) {
+type StatCardProps = {
+  icon: ReactNode;
+  color: 'red' | 'blue' | 'green' | 'amber';
+  val: string;
+  label: string;
+  change: string;
+  changeColor: string;
+};
+
+function StatCard({ icon, color, val, label, change, changeColor }: StatCardProps) {
   const bg = color === 'red' ? 'bg-red-glow text-red' : color === 'blue' ? 'bg-blue-bg text-blue' : color === 'green' ? 'bg-green-bg text-green' : 'bg-amber-bg text-amber';
   return (
-    <div className="bg-white border border-gray-100 rounded-[12px] p-4 relative overflow-hidden">
+    <div className="bg-white border border-gray-100 rounded-sm p-4 relative overflow-hidden">
       <div className={`w-9 h-9 rounded-lg flex items-center justify-center mb-2.5 ${bg}`}>{icon}</div>
       <div className="text-2xl font-bold text-gray-800 leading-none mb-1">{val}</div>
       <div className="text-xs text-gray-400 font-medium">{label}</div>

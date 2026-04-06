@@ -10,13 +10,23 @@ dotenv.config();
 
 const app = express();
 const httpServer = createServer(app);
+const frontendOrigin = process.env.FRONTEND_ORIGIN || 'http://localhost:3010';
 const io = new Server(httpServer, {
   cors: {
-    origin: '*',
-  }
+    origin: [frontendOrigin, 'http://localhost:3000', 'http://localhost:3010'],
+    methods: ['GET', 'POST'],
+    credentials: true,
+  },
+  transports: ['websocket', 'polling'],
+  pingInterval: 25000,
+  pingTimeout: 20000,
 });
 
 app.use(cors());
+app.use((req, res, next) => {
+  (req as any).io = io;
+  next();
+});
 app.use(express.json());
 
 // Health-check root route (fixes 404 on GET /)
@@ -25,7 +35,10 @@ app.get('/', (_req, res) => {
 });
 
 // Routes
+import donorStatsRoutes from './routes/donorStats';
+
 app.use('/api', apiRoutes);
+app.use('/api/donor', donorStatsRoutes);
 
 // Database Connection — tries Atlas first, falls back to local MongoDB
 const ATLAS_URI = (process.env.MONGODB_URI || '').trim();
@@ -73,15 +86,13 @@ mongoose.connection.on('error', (err) => {
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
-  socket.on('join_room', (role) => {
-    socket.join(role);
-    console.log(`User joined room: ${role}`);
+  socket.on('join', (userId) => {
+    socket.join(userId);
+    console.log(`User joined personal room: ${userId}`);
   });
 
   socket.on('sos_alert', (data) => {
-    console.log('SOS Alert received:', data);
-    // Broadcast to donors
-    socket.to('donor').emit('new_sos_alert', data);
+    console.log('SOS Alert received mapping directly:', data);
   });
 
   socket.on('disconnect', () => {

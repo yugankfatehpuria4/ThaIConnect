@@ -1,4 +1,5 @@
 'use client';
+import { useState, useEffect } from 'react';
 import { Trophy, Star, Zap, Heart, Shield, Target, Award, TrendingUp } from 'lucide-react';
 
 type Badge = {
@@ -9,28 +10,103 @@ type Badge = {
   earnedDate?: string;
 };
 
-const badges: Badge[] = [
-  { icon: '🩸', label: 'First Drop', description: 'Complete your first blood donation', earned: true, earnedDate: 'Aug 2023' },
-  { icon: '⚡', label: 'SOS Hero', description: 'Respond to an emergency SOS within 30 minutes', earned: true, earnedDate: 'Nov 2024' },
-  { icon: '🏅', label: '5 Lives Saved', description: 'Complete 5 blood donations', earned: true, earnedDate: 'May 2024' },
+const allBadges: Badge[] = [
+  { icon: '🩸', label: 'First Drop', description: 'Complete your first blood donation', earned: false },
+  { icon: '⚡', label: 'SOS Hero', description: 'Respond to 3+ emergency SOS requests', earned: false },
+  { icon: '🏅', label: '5 Lives Saved', description: 'Complete 5 blood donations', earned: false },
   { icon: '🌟', label: '10 Lives Saved', description: 'Complete 10 blood donations', earned: false },
   { icon: '💪', label: 'Iron Will', description: 'Donate every 90 days for a full year', earned: false },
-  { icon: '🎯', label: 'Perfect Match', description: 'Get a 95+ AI compatibility score', earned: true, earnedDate: 'Feb 2025' },
+  { icon: '🎯', label: 'Perfect Match', description: 'Get a 95+ AI compatibility score', earned: false },
   { icon: '🤝', label: 'Community Builder', description: 'Refer 3 new donors to the platform', earned: false },
   { icon: '👑', label: 'Platinum Donor', description: 'Reach 2,000 impact points', earned: false },
 ];
 
-const milestones = [
-  { label: 'Bronze', points: 500, achieved: true },
-  { label: 'Silver', points: 1000, achieved: true },
-  { label: 'Gold', points: 2000, achieved: false, current: true },
-  { label: 'Platinum', points: 5000, achieved: false },
-];
+type LeaderboardEntry = {
+  rank: number;
+  name: string;
+  points: number;
+  userId?: string;
+};
 
 export default function AchievementsPage() {
-  const currentPoints = 1260;
+  const [currentPoints, setCurrentPoints] = useState(1260);
+  const [badges, setBadges] = useState<Badge[]>(
+    allBadges.map(b => ({
+      ...b,
+      earned: ['First Drop', 'SOS Hero', '5 Lives Saved', 'Perfect Match'].includes(b.label),
+    }))
+  );
+  const [milestonesData, setMilestonesData] = useState({ bronze: true, silver: true, gold: false });
+  const [userName, setUserName] = useState('You');
+  const [apiError, setApiError] = useState<string | null>(null);
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Get logged-in user's name and ID
+    try {
+      const stored = localStorage.getItem('user');
+      if (stored) {
+        const u = JSON.parse(stored);
+        if (u.name) setUserName(u.name);
+        if (u.id) setCurrentUserId(u.id);
+      }
+    } catch (e) {}
+
+    const token = localStorage.getItem('token') || '';
+    const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
+
+    const fetchData = async () => {
+      try {
+        const [dashboardRes, achievementsRes, leaderboardRes] = await Promise.all([
+          fetch('/api/donor/dashboard', { headers }),
+          fetch('/api/donor/achievements', { headers }),
+          fetch('/api/donor/leaderboard'),
+        ]);
+
+        if (!dashboardRes.ok || !achievementsRes.ok) {
+          throw new Error('Unable to load donor achievements data');
+        }
+
+        const dashboardData = await dashboardRes.json();
+        if (dashboardData.impactPoints !== undefined) {
+          setCurrentPoints(dashboardData.impactPoints);
+        }
+
+        const achievementsData = await achievementsRes.json();
+        if (achievementsData.badges) {
+          const earnedSet = new Set(achievementsData.badges);
+          setBadges(allBadges.map(b => ({
+            ...b,
+            earned: earnedSet.has(b.label),
+          })));
+        }
+        if (achievementsData.milestones) {
+          setMilestonesData(achievementsData.milestones);
+        }
+
+        // Fetch leaderboard
+        if (leaderboardRes.ok) {
+          const leaderboardData = await leaderboardRes.json();
+          setLeaderboard(leaderboardData);
+        }
+      } catch {
+        setApiError('Could not load live achievement data. Showing cached defaults.');
+      }
+    };
+
+    fetchData();
+  }, []);
+
+  const milestones = [
+    { label: 'Bronze', points: 500, achieved: milestonesData.bronze },
+    { label: 'Silver', points: 1000, achieved: milestonesData.silver },
+    { label: 'Gold', points: 2000, achieved: milestonesData.gold, current: !milestonesData.gold },
+    { label: 'Platinum', points: 5000, achieved: false },
+  ];
+
   const nextMilestone = milestones.find(m => !m.achieved);
-  const progress = nextMilestone ? (currentPoints / nextMilestone.points) * 100 : 100;
+  const progress = nextMilestone ? Math.min(100, (currentPoints / nextMilestone.points) * 100) : 100;
 
   return (
     <div className="flex flex-col gap-5">
@@ -39,6 +115,11 @@ export default function AchievementsPage() {
         <h1 className="text-2xl font-bold text-gray-800">Achievements</h1>
         <p className="text-sm text-gray-500 mt-1">Track your badges, milestones, and impact on the community</p>
       </div>
+      {apiError && (
+        <div className="rounded-xl border border-amber/40 bg-amber-bg px-4 py-2 text-sm text-amber">
+          {apiError}
+        </div>
+      )}
 
       {/* Points Card */}
       <div className="bg-gradient-to-r from-red to-red-dark text-white rounded-2xl p-6 relative overflow-hidden">
@@ -49,13 +130,13 @@ export default function AchievementsPage() {
             <div className="text-xs font-semibold opacity-80 uppercase tracking-wider mb-1">Impact Points</div>
             <div className="text-5xl font-bold">{currentPoints.toLocaleString()}</div>
             <div className="text-sm opacity-80 mt-2 flex items-center gap-2">
-              <TrendingUp size={14} /> +260 points this month
+              <TrendingUp size={14} /> {userName}&apos;s lifetime impact
             </div>
           </div>
           <div className="bg-white/15 backdrop-blur-sm rounded-xl p-4 min-w-[200px]">
             <div className="text-xs opacity-80 mb-2">Next Milestone: {nextMilestone?.label}</div>
             <div className="h-3 bg-white/20 rounded-full overflow-hidden">
-              <div className="h-full bg-white rounded-full transition-all" style={{ width: `${progress}%` }}></div>
+              <div className="h-full bg-white rounded-full transition-all duration-1000" style={{ width: `${progress}%` }}></div>
             </div>
             <div className="text-xs mt-2 opacity-80">{currentPoints} / {nextMilestone?.points} pts</div>
           </div>
@@ -98,7 +179,7 @@ export default function AchievementsPage() {
               <div className="text-sm font-bold text-gray-800 mb-1">{badge.label}</div>
               <div className="text-[11px] text-gray-500 leading-relaxed mb-2">{badge.description}</div>
               {badge.earned ? (
-                <span className="chip chip-green text-[10px]"><span className="chip-dot"></span>Earned · {badge.earnedDate}</span>
+                <span className="chip chip-green text-[10px]"><span className="chip-dot"></span>Earned</span>
               ) : (
                 <span className="chip chip-amber text-[10px]"><span className="chip-dot"></span>Locked</span>
               )}
@@ -111,25 +192,49 @@ export default function AchievementsPage() {
       <div className="card">
         <h2 className="card-title mb-4">Donor Leaderboard — Top 5</h2>
         <div className="flex flex-col gap-2">
-          {[
-            { rank: 1, name: 'Priya K.', points: 3450, badge: '👑' },
-            { rank: 2, name: 'Vikram M.', points: 2820, badge: '🥈' },
-            { rank: 3, name: 'You (Arjun S.)', points: 1260, badge: '🥉', isYou: true },
-            { rank: 4, name: 'Deepika R.', points: 980, badge: '' },
-            { rank: 5, name: 'Amit T.', points: 750, badge: '' },
-          ].map(entry => (
-            <div key={entry.rank} className={`flex items-center gap-3 p-3 rounded-xl ${entry.isYou ? 'bg-red-glow/20 border border-red/20' : 'bg-gray-50'}`}>
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${entry.rank <= 3 ? 'bg-amber-bg text-amber' : 'bg-gray-200 text-gray-500'}`}>
-                {entry.badge || entry.rank}
+          {leaderboard.length > 0 ? (
+            leaderboard.map((entry) => {
+              const isYou = currentUserId && entry.userId === currentUserId;
+              const getRankBadge = (rank: number) => {
+                if (rank === 1) return '👑';
+                if (rank === 2) return '🥈';
+                if (rank === 3) return '🥉';
+                return rank;
+              };
+              return (
+                <div key={entry.rank} className={`flex items-center gap-3 p-3 rounded-xl ${isYou ? 'bg-red-glow/20 border border-red/20' : 'bg-gray-50'}`}>
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${entry.rank <= 3 ? 'bg-amber-bg text-amber' : 'bg-gray-200 text-gray-500'}`}>
+                    {getRankBadge(entry.rank)}
+                  </div>
+                  <div className="flex-1">
+                    <span className={`text-sm font-semibold ${isYou ? 'text-red' : 'text-gray-800'}`}>{isYou ? `You (${entry.name})` : entry.name}</span>
+                  </div>
+                  <span className="text-sm font-bold text-gray-800">{entry.points.toLocaleString()} pts</span>
+                </div>
+              );
+            })
+          ) : (
+            [
+              { rank: 1, name: 'Priya K.', points: 3450, badge: '👑' },
+              { rank: 2, name: 'Vikram M.', points: 2820, badge: '🥈' },
+              { rank: 3, name: `You (${userName})`, points: currentPoints, badge: '🥉', isYou: true },
+              { rank: 4, name: 'Deepika R.', points: 980, badge: '' },
+              { rank: 5, name: 'Amit T.', points: 750, badge: '' },
+            ].map(entry => (
+              <div key={entry.rank} className={`flex items-center gap-3 p-3 rounded-xl ${entry.isYou ? 'bg-red-glow/20 border border-red/20' : 'bg-gray-50'}`}>
+                <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${entry.rank <= 3 ? 'bg-amber-bg text-amber' : 'bg-gray-200 text-gray-500'}`}>
+                  {entry.badge || entry.rank}
+                </div>
+                <div className="flex-1">
+                  <span className={`text-sm font-semibold ${entry.isYou ? 'text-red' : 'text-gray-800'}`}>{entry.name}</span>
+                </div>
+                <span className="text-sm font-bold text-gray-800">{entry.points.toLocaleString()} pts</span>
               </div>
-              <div className="flex-1">
-                <span className={`text-sm font-semibold ${entry.isYou ? 'text-red' : 'text-gray-800'}`}>{entry.name}</span>
-              </div>
-              <span className="text-sm font-bold text-gray-800">{entry.points.toLocaleString()} pts</span>
-            </div>
-          ))}
+            ))
+          )}
         </div>
       </div>
     </div>
   );
 }
+

@@ -140,7 +140,7 @@ export default function Home() {
 
           <h1 className="font-display text-5xl md:text-7xl font-bold leading-tight max-w-4xl">
             Connecting Lives Through{' '}
-            <span className="text-transparent bg-clip-text bg-gradient-to-r from-red to-red-dark">
+            <span className="text-transparent bg-clip-text bg-linear-to-r from-red to-red-dark">
               AI-Powered
             </span>{' '}
             Blood Donation
@@ -180,11 +180,11 @@ export default function Home() {
       {/* ═══════════════════════════════════════
           📊 STATS SECTION
           ═══════════════════════════════════════ */}
-      <section id="stats" className="relative py-24 bg-gradient-to-b from-gray-50 to-white">
+      <section id="stats" className="relative py-24 bg-linear-to-b from-gray-50 to-white">
         <div className="max-w-5xl mx-auto px-6">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
             <div className="text-center p-8 rounded-2xl bg-white shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
-              <h2 className="text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-red to-red-dark tabular-nums">
+              <h2 className="text-5xl font-bold text-transparent bg-clip-text bg-linear-to-r from-red to-red-dark tabular-nums">
                 {donors.count.toLocaleString()}+
               </h2>
               <p className="text-gray-500 mt-3 font-medium">Registered Donors</p>
@@ -192,7 +192,7 @@ export default function Home() {
             </div>
 
             <div className="text-center p-8 rounded-2xl bg-white shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
-              <h2 className="text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-red to-red-dark tabular-nums">
+              <h2 className="text-5xl font-bold text-transparent bg-clip-text bg-linear-to-r from-red to-red-dark tabular-nums">
                 {lives.count.toLocaleString()}+
               </h2>
               <p className="text-gray-500 mt-3 font-medium">Lives Impacted</p>
@@ -200,7 +200,7 @@ export default function Home() {
             </div>
 
             <div className="text-center p-8 rounded-2xl bg-white shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
-              <h2 className="text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-red to-red-dark tabular-nums">
+              <h2 className="text-5xl font-bold text-transparent bg-clip-text bg-linear-to-r from-red to-red-dark tabular-nums">
                 {emergencies.count.toLocaleString()}+
               </h2>
               <p className="text-gray-500 mt-3 font-medium">Emergency Responses</p>
@@ -251,7 +251,7 @@ export default function Home() {
       {/* ═══════════════════════════════════════
           ℹ️ ABOUT / HOW IT WORKS
           ═══════════════════════════════════════ */}
-      <section id="about" className="py-24 px-6 bg-gradient-to-b from-white to-gray-50">
+      <section id="about" className="py-24 px-6 bg-linear-to-b from-white to-gray-50">
         <div className="max-w-5xl mx-auto">
           <div className="text-center mb-16">
             <span className="text-sm font-semibold text-red uppercase tracking-widest">How It Works</span>
@@ -282,7 +282,7 @@ export default function Home() {
           🔥 CTA SECTION
           ═══════════════════════════════════════ */}
       <section className="relative py-24 overflow-hidden">
-        <div className="absolute inset-0 bg-gradient-to-br from-red to-red-dark" />
+        <div className="absolute inset-0 bg-linear-to-br from-red to-red-dark" />
         <div className="absolute inset-0 opacity-10">
           <div className="absolute top-10 left-10 w-64 h-64 bg-white rounded-full blur-3xl" />
           <div className="absolute bottom-10 right-10 w-48 h-48 bg-white rounded-full blur-3xl" />

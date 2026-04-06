@@ -1,6 +1,6 @@
 'use client';
-import { useState } from 'react';
-import { Calendar, Clock, MapPin, Plus, ChevronLeft, ChevronRight, CheckCircle2, AlertCircle } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Calendar, Clock, MapPin, Plus, CheckCircle2, AlertCircle } from 'lucide-react';
 
 type Appointment = {
   id: string;
@@ -13,16 +13,6 @@ type Appointment = {
   notes?: string;
 };
 
-const mockAppointments: Appointment[] = [
-  { id: '1', date: '2025-03-28', time: '10:00 AM', type: 'transfusion', hospital: 'AIIMS Delhi', doctor: 'Dr. Sharma', status: 'completed', notes: '2 units B+ · Hb post: 10.2 g/dL' },
-  { id: '2', date: '2025-04-02', time: '09:30 AM', type: 'transfusion', hospital: 'AIIMS Delhi', doctor: 'Dr. Sharma', status: 'upcoming', notes: '2 units B+ required' },
-  { id: '3', date: '2025-04-05', time: '02:00 PM', type: 'checkup', hospital: 'Safdarjung Hospital', doctor: 'Dr. Kapoor', status: 'upcoming' },
-  { id: '4', date: '2025-04-15', time: '11:00 AM', type: 'consultation', hospital: 'Apollo Delhi', doctor: 'Dr. Mehta', status: 'upcoming', notes: 'Iron chelation review' },
-  { id: '5', date: '2025-04-25', time: '10:00 AM', type: 'transfusion', hospital: 'AIIMS Delhi', doctor: 'Dr. Sharma', status: 'upcoming', notes: 'Estimated · 21-day cycle' },
-  { id: '6', date: '2025-03-07', time: '10:00 AM', type: 'transfusion', hospital: 'AIIMS Delhi', doctor: 'Dr. Sharma', status: 'completed', notes: '2 units B+ · Hb post: 9.8 g/dL' },
-  { id: '7', date: '2025-02-14', time: '10:00 AM', type: 'transfusion', hospital: 'Safdarjung Hospital', status: 'completed', notes: '2 units B+ · Hb post: 10.1 g/dL' },
-];
-
 const typeConfig = {
   transfusion: { label: 'Transfusion', color: 'chip-red', icon: '🩸' },
   checkup: { label: 'Health Checkup', color: 'chip-blue', icon: '🔬' },
@@ -30,13 +20,72 @@ const typeConfig = {
 };
 
 export default function SchedulePage() {
+  const [appointments, setAppointments] = useState<Appointment[]>([]);
+  const [avgCycle, setAvgCycle] = useState(21);
+  const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'upcoming' | 'completed'>('all');
   const [showAdd, setShowAdd] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({
+    type: 'transfusion' as Appointment['type'],
+    date: '',
+    hospital: '',
+    doctor: '',
+    notes: '',
+  });
 
-  const upcoming = mockAppointments.filter(a => a.status === 'upcoming');
+  const fetchAppointments = () => {
+    setLoading(true);
+    fetch('/api/patient/appointments', {
+      headers: { 'Authorization': `Bearer ${localStorage.getItem('token') || ''}` },
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (Array.isArray(data?.appointments)) {
+          setAppointments(data.appointments);
+        }
+        if (typeof data?.avgCycle === 'number') {
+          setAvgCycle(data.avgCycle);
+        }
+      })
+      .catch(console.error)
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    fetchAppointments();
+  }, []);
+
+  const upcoming = appointments.filter(a => a.status === 'upcoming');
   const nextAppointment = upcoming[0];
 
-  const filteredAppointments = mockAppointments.filter(a => filter === 'all' || a.status === filter);
+  const filteredAppointments = appointments.filter(a => filter === 'all' || a.status === filter);
+
+  const saveAppointment = async () => {
+    if (!form.date || !form.hospital) return;
+    setSaving(true);
+    try {
+      const res = await fetch('/api/patient/appointments', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
+        },
+        body: JSON.stringify(form),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data?.error || 'Failed to save appointment');
+      }
+      setShowAdd(false);
+      setForm({ type: 'transfusion', date: '', hospital: '', doctor: '', notes: '' });
+      fetchAppointments();
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="flex flex-col gap-5">
@@ -56,7 +105,7 @@ export default function SchedulePage() {
 
       {/* Next Appointment Banner */}
       {nextAppointment && (
-        <div className="bg-gradient-to-r from-red to-red-dark text-white rounded-2xl p-6 relative overflow-hidden">
+        <div className="bg-linear-to-r from-red to-red-dark text-white rounded-2xl p-6 relative overflow-hidden">
           <div className="absolute -right-8 -top-8 w-32 h-32 bg-white/10 rounded-full blur-2xl"></div>
           <div className="relative z-10">
             <div className="text-xs font-semibold opacity-80 uppercase tracking-wider mb-2">Next Appointment</div>
@@ -77,16 +126,16 @@ export default function SchedulePage() {
 
       {/* Stats Row */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="bg-white border border-gray-100 rounded-[12px] p-4">
+        <div className="bg-white border border-gray-100 rounded-sm p-4">
           <div className="text-2xl font-bold text-gray-800">{upcoming.length}</div>
           <div className="text-xs text-gray-400 font-medium">Upcoming Appointments</div>
         </div>
-        <div className="bg-white border border-gray-100 rounded-[12px] p-4">
-          <div className="text-2xl font-bold text-gray-800">{mockAppointments.filter(a => a.status === 'completed').length}</div>
+        <div className="bg-white border border-gray-100 rounded-sm p-4">
+          <div className="text-2xl font-bold text-gray-800">{appointments.filter(a => a.status === 'completed').length}</div>
           <div className="text-xs text-gray-400 font-medium">Completed This Year</div>
         </div>
-        <div className="bg-white border border-gray-100 rounded-[12px] p-4">
-          <div className="text-2xl font-bold text-red">21 Days</div>
+        <div className="bg-white border border-gray-100 rounded-sm p-4">
+          <div className="text-2xl font-bold text-red">{avgCycle} Days</div>
           <div className="text-xs text-gray-400 font-medium">Average Cycle Duration</div>
         </div>
       </div>
@@ -106,7 +155,11 @@ export default function SchedulePage() {
 
       {/* Appointments List */}
       <div className="flex flex-col gap-3">
-        {filteredAppointments.map(apt => {
+        {loading ? (
+          <div className="card text-center py-8 text-gray-500 text-sm">Loading appointments...</div>
+        ) : filteredAppointments.length === 0 ? (
+          <div className="card text-center py-8 text-gray-500 text-sm">No appointments found for this filter.</div>
+        ) : filteredAppointments.map(apt => {
           const config = typeConfig[apt.type];
           return (
             <div key={apt.id} className="card hover:shadow-md transition-shadow">
@@ -150,28 +203,56 @@ export default function SchedulePage() {
             <div className="space-y-3">
               <div>
                 <label className="text-xs font-medium text-gray-500 mb-1 block">Type</label>
-                <select className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-red bg-white">
-                  <option>Transfusion</option>
-                  <option>Health Checkup</option>
-                  <option>Consultation</option>
+                <select
+                  value={form.type}
+                  onChange={(e) => setForm(prev => ({ ...prev, type: e.target.value as Appointment['type'] }))}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-red bg-white"
+                >
+                  <option value="transfusion">Transfusion</option>
+                  <option value="checkup">Health Checkup</option>
+                  <option value="consultation">Consultation</option>
                 </select>
               </div>
               <div>
                 <label className="text-xs font-medium text-gray-500 mb-1 block">Date</label>
-                <input type="date" className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-red" />
+                <input
+                  type="date"
+                  value={form.date}
+                  onChange={(e) => setForm(prev => ({ ...prev, date: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-red"
+                />
               </div>
               <div>
                 <label className="text-xs font-medium text-gray-500 mb-1 block">Hospital</label>
-                <input placeholder="e.g. AIIMS Delhi" className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-red" />
+                <input
+                  value={form.hospital}
+                  onChange={(e) => setForm(prev => ({ ...prev, hospital: e.target.value }))}
+                  placeholder="e.g. AIIMS Delhi"
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-red"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-gray-500 mb-1 block">Doctor</label>
+                <input
+                  value={form.doctor}
+                  onChange={(e) => setForm(prev => ({ ...prev, doctor: e.target.value }))}
+                  placeholder="e.g. Dr. Sharma"
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-red"
+                />
               </div>
               <div>
                 <label className="text-xs font-medium text-gray-500 mb-1 block">Notes</label>
-                <textarea placeholder="Optional notes..." className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-red resize-none h-20" />
+                <textarea
+                  value={form.notes}
+                  onChange={(e) => setForm(prev => ({ ...prev, notes: e.target.value }))}
+                  placeholder="Optional notes..."
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-red resize-none h-20"
+                />
               </div>
             </div>
             <div className="flex gap-3 mt-5">
               <button onClick={() => setShowAdd(false)} className="flex-1 py-2.5 bg-gray-50 text-gray-600 rounded-xl text-sm font-medium hover:bg-gray-100 transition-colors">Cancel</button>
-              <button onClick={() => setShowAdd(false)} className="flex-1 py-2.5 bg-red text-white rounded-xl text-sm font-semibold hover:bg-red-dark transition-colors">Save</button>
+              <button onClick={saveAppointment} disabled={saving} className="flex-1 py-2.5 bg-red text-white rounded-xl text-sm font-semibold hover:bg-red-dark transition-colors disabled:opacity-60">{saving ? 'Saving...' : 'Save'}</button>
             </div>
           </div>
         </div>

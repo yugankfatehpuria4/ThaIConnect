@@ -34,6 +34,7 @@ export default function RegisterPage() {
       const data = await res.json();
       localStorage.setItem('token', data.token);
       localStorage.setItem('role', data.user.role);
+      localStorage.setItem('user', JSON.stringify(data.user));
       
       // Navigate to the user's new dashboard
       router.replace(`/dashboard/${data.user.role}`);
