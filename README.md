@@ -16,7 +16,7 @@
 ---
 
 🔗 **Live Demo** · *(Add your link)*
-📂 **Repository** · https://github.com/your-username/ThalAI-Connect
+📂 **Repository** · https://github.com/yugankfatehpuria4/ThaIConnect
 
 </div>
 
@@ -169,8 +169,8 @@ The ML system provides **basic clinical decision support**:
 ### ⚙️ Setup
 
 ```bash
-git clone https://github.com/your-username/ThalAI-Connect.git
-cd ThalAI-Connect
+git clone https://github.com/yugankfatehpuria4/ThaIConnect.git
+cd ThaIConnect
 ```
 
 ---
