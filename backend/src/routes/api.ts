@@ -213,9 +213,9 @@ router.post('/seed', async (req: Request, res: Response) => {
     await DonorProfileModel.deleteMany({});
     await Donation.deleteMany({});
     await Achievement.deleteMany({});
-    
+
     await User.syncIndexes();
-    
+
     const donorsStr = [
       { name: 'Arjun Sharma', email: 'arjun@example.com', role: 'donor', bloodGroup: 'B+', location: { type: 'Point', coordinates: [77.1025, 28.7041] }, avail: 'Available', password: 'mockpasswordhashed' },
       { name: 'Priya Kapoor', email: 'priya@example.com', role: 'donor', bloodGroup: 'B+', location: { type: 'Point', coordinates: [77.1502 - 0.02, 28.9889 + 0.01] }, avail: 'Available', password: 'mockpasswordhashed' },
@@ -225,28 +225,28 @@ router.post('/seed', async (req: Request, res: Response) => {
     const insertedUsers = await User.insertMany(donorsStr);
 
     for (let i = 0; i < insertedUsers.length; i++) {
-        const u = insertedUsers[i];
-        const multiplier = 3 - i; // just cascading sample vars
+      const u = insertedUsers[i];
+      const multiplier = 3 - i; // just cascading sample vars
 
-        await DonorProfileModel.create({
-            userId: u._id,
-            totalDonations: 7 * multiplier,
-            lastDonationDate: new Date('2025-02-01'),
-            responseStats: { totalSOS: 10 * multiplier, acceptedSOS: 9 * multiplier },
-            impactPoints: 1260 * multiplier
-        });
+      await DonorProfileModel.create({
+        userId: u._id,
+        totalDonations: 7 * multiplier,
+        lastDonationDate: new Date('2025-02-01'),
+        responseStats: { totalSOS: 10 * multiplier, acceptedSOS: 9 * multiplier },
+        impactPoints: 1260 * multiplier
+      });
 
-        await Donation.insertMany([
-            { donorId: u._id, date: new Date('2025-02-28'), location: 'AIIMS Delhi', type: 'Whole blood', recipientType: 'Thalassemia patient', status: 'Completed', verified: true, unitsDonated: 1 },
-            { donorId: u._id, date: new Date('2024-11-15'), location: 'Safdarjung', type: 'Whole blood', recipientType: 'Emergency SOS', status: 'Completed', verified: true, unitsDonated: 2 },
-            { donorId: u._id, date: new Date('2025-05-25'), location: 'Pending match location', type: 'Platelets', recipientType: 'Pending match', status: 'Scheduled', verified: false, unitsDonated: 1 }
-        ]);
+      await Donation.insertMany([
+        { donorId: u._id, date: new Date('2025-02-28'), location: 'AIIMS Delhi', type: 'Whole blood', recipientType: 'Thalassemia patient', status: 'Completed', verified: true, unitsDonated: 1 },
+        { donorId: u._id, date: new Date('2024-11-15'), location: 'Safdarjung', type: 'Whole blood', recipientType: 'Emergency SOS', status: 'Completed', verified: true, unitsDonated: 2 },
+        { donorId: u._id, date: new Date('2025-05-25'), location: 'Pending match location', type: 'Platelets', recipientType: 'Pending match', status: 'Scheduled', verified: false, unitsDonated: 1 }
+      ]);
 
-        await Achievement.create({
-            donorId: u._id,
-            badges: ['First Drop', 'SOS Hero', '5 Lives Saved'],
-            milestones: { bronze: true, silver: false, gold: false }
-        });
+      await Achievement.create({
+        donorId: u._id,
+        badges: ['First Drop', 'SOS Hero', '5 Lives Saved'],
+        milestones: { bronze: true, silver: false, gold: false }
+      });
     }
 
     res.json({ message: 'Real-World Mock Data explicitly seeded bridging all schemas!' });
@@ -640,15 +640,15 @@ router.get('/admin/sos-delivery-logs', authMiddleware, async (req: Request, res:
 
       const deliveryRows = Array.isArray(alert.deliveryLogs)
         ? alert.deliveryLogs.map((entry: any) => ({
-            ...base,
-            channel: entry.channel,
-            event: entry.event,
-            recipientEmail: entry.recipientEmail || null,
-            recipientUserId: entry.recipientUserId ? String(entry.recipientUserId) : null,
-            statusDelivery: entry.status,
-            reason: entry.reason || null,
-            createdAt: entry.createdAt || alert.createdAt,
-          }))
+          ...base,
+          channel: entry.channel,
+          event: entry.event,
+          recipientEmail: entry.recipientEmail || null,
+          recipientUserId: entry.recipientUserId ? String(entry.recipientUserId) : null,
+          statusDelivery: entry.status,
+          reason: entry.reason || null,
+          createdAt: entry.createdAt || alert.createdAt,
+        }))
         : [];
 
       if (deliveryRows.length > 0) return deliveryRows;
@@ -810,24 +810,24 @@ router.get('/donors/nearby', async (req: Request, res: Response) => {
     }
 
     const donors = await User.find(query).limit(20).exec();
-    
+
     const formattedDonors = donors.map((d: any) => {
       const donorLat = d.location?.coordinates?.[1] || 0;
       const donorLng = d.location?.coordinates?.[0] || 0;
-      
+
       const dist = d.distance || calculateApproxDistance(Number(lat), Number(lng), donorLat, donorLng);
-      
+
       // Calculate Smart Match Score
       const isExactMatch = !bloodGroup || bloodGroup === 'all' || d.bloodGroup === bloodGroup;
       const compScore = isExactMatch ? 1 : 0.8;
-      
-      const distFactor = Math.max(0, 1 - (dist / (Number(maxDistance)/1000))); // normalize distance 0-1
+
+      const distFactor = Math.max(0, 1 - (dist / (Number(maxDistance) / 1000))); // normalize distance 0-1
       const donCountFactor = Math.min(1, (d.donationsCount || 0) / 10);
       const availFactor = d.avail === 'Available' ? 1 : 0.5;
-      
+
       let rawScore = (0.4 * compScore) + (0.3 * distFactor) + (0.2 * donCountFactor) + (0.1 * availFactor);
       const finalScore = (rawScore * 100).toFixed(1);
-      
+
       return {
         _id: d._id,
         name: d.name,
@@ -880,7 +880,7 @@ router.get('/patient/timeline', authMiddleware, async (req: Request, res: Respon
         hospital: entry.hospital || 'Unknown Hospital',
       }))
       .sort((a: any, b: any) => a.date.getTime() - b.date.getTime());
-    
+
     if (transfusions.length < 2) {
       return res.json({
         lastTransfusion: transfusions[0]?.date || new Date(),
@@ -897,10 +897,10 @@ router.get('/patient/timeline', authMiddleware, async (req: Request, res: Respon
       const curr = new Date(transfusions[i].date);
       totalDays += (curr.getTime() - prev.getTime()) / (1000 * 60 * 60 * 24);
     }
-    
+
     const avgCycle = Math.max(14, Math.floor(totalDays / (transfusions.length - 1)));
     const last = transfusions[transfusions.length - 1];
-    
+
     const nextDate = new Date(last.date);
     nextDate.setDate(nextDate.getDate() + avgCycle);
 
