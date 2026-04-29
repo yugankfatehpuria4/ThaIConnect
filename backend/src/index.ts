@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
+import net from 'net';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import apiRoutes from './routes/api';
@@ -10,10 +11,15 @@ dotenv.config();
 
 const app = express();
 const httpServer = createServer(app);
-const frontendOrigin = process.env.FRONTEND_ORIGIN || 'http://localhost:3010';
+const defaultOrigins = ['http://localhost:3000', 'http://localhost:3010'];
+const configuredOrigins = (process.env.FRONTEND_ORIGIN || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const allowedOrigins = Array.from(new Set([...defaultOrigins, ...configuredOrigins]));
 const io = new Server(httpServer, {
   cors: {
-    origin: [frontendOrigin, 'http://localhost:3000', 'http://localhost:3010'],
+    origin: allowedOrigins,
     methods: ['GET', 'POST'],
     credentials: true,
   },
@@ -22,7 +28,11 @@ const io = new Server(httpServer, {
   pingTimeout: 20000,
 });
 
-app.use(cors());
+app.use(cors({
+  origin: allowedOrigins,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  credentials: true,
+}));
 app.use((req, res, next) => {
   (req as any).io = io;
   next();
@@ -87,6 +97,7 @@ io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
   socket.on('join', (userId) => {
+    if (!userId || typeof userId !== 'string') return;
     socket.join(userId);
     console.log(`User joined personal room: ${userId}`);
   });
@@ -100,7 +111,40 @@ io.on('connection', (socket) => {
   });
 });
 
-const PORT = process.env.PORT || 5000;
-httpServer.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+const BASE_PORT = Number(process.env.PORT || 5000);
+const MAX_PORT_ATTEMPTS = Number(process.env.PORT_FALLBACK_ATTEMPTS || 10);
+
+function isPortFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const tester = net.createServer();
+    tester.once('error', () => resolve(false));
+    tester.once('listening', () => {
+      tester.close(() => resolve(true));
+    });
+    tester.listen(port);
+  });
+}
+
+async function resolveOpenPort(basePort: number, maxAttempts: number): Promise<number | null> {
+  for (let offset = 0; offset <= maxAttempts; offset += 1) {
+    const candidatePort = basePort + offset;
+    const free = await isPortFree(candidatePort);
+    if (free) return candidatePort;
+    console.warn(`Port ${candidatePort} is busy. Trying next port...`);
+  }
+  return null;
+}
+
+async function startServer() {
+  const chosenPort = await resolveOpenPort(BASE_PORT, MAX_PORT_ATTEMPTS);
+  if (chosenPort == null) {
+    console.error(`No open port found between ${BASE_PORT} and ${BASE_PORT + MAX_PORT_ATTEMPTS}.`);
+    process.exit(1);
+  }
+
+  httpServer.listen(chosenPort, () => {
+    console.log(`Server running on port ${chosenPort}`);
+  });
+}
+
+startServer();

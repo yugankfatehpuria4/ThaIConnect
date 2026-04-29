@@ -28,6 +28,22 @@ type LeaderboardEntry = {
   userId?: string;
 };
 
+type DonationRecord = {
+  date: string;
+  location: string;
+  type: string;
+  recipientType?: string;
+  status: 'Completed' | 'Scheduled' | 'Cancelled';
+  verified: boolean;
+  unitsDonated?: number;
+};
+
+const defaultAchievementHistory: DonationRecord[] = [
+  { date: '2025-02-28', location: 'AIIMS Delhi', type: 'Whole blood', recipientType: 'Thalassemia patient', status: 'Completed', verified: true, unitsDonated: 1 },
+  { date: '2024-11-15', location: 'Safdarjung Hospital', type: 'Whole blood', recipientType: 'Emergency SOS', status: 'Completed', verified: true, unitsDonated: 1 },
+  { date: '2024-08-03', location: 'Apollo Delhi', type: 'Platelets', recipientType: 'Thalassemia patient', status: 'Completed', verified: true, unitsDonated: 1 },
+];
+
 export default function AchievementsPage() {
   const [currentPoints, setCurrentPoints] = useState(1260);
   const [badges, setBadges] = useState<Badge[]>(
@@ -41,6 +57,9 @@ export default function AchievementsPage() {
   const [apiError, setApiError] = useState<string | null>(null);
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  
+  // Default data as donation history in the achievements section
+  const [history, setHistory] = useState<DonationRecord[]>(defaultAchievementHistory);
 
   useEffect(() => {
     // Get logged-in user's name and ID
@@ -58,10 +77,11 @@ export default function AchievementsPage() {
 
     const fetchData = async () => {
       try {
-        const [dashboardRes, achievementsRes, leaderboardRes] = await Promise.all([
+        const [dashboardRes, achievementsRes, leaderboardRes, historyRes] = await Promise.all([
           fetch('/api/donor/dashboard', { headers }),
           fetch('/api/donor/achievements', { headers }),
           fetch('/api/donor/leaderboard'),
+          fetch('/api/donor/history', { headers }),
         ]);
 
         if (!dashboardRes.ok || !achievementsRes.ok) {
@@ -89,6 +109,22 @@ export default function AchievementsPage() {
         if (leaderboardRes.ok) {
           const leaderboardData = await leaderboardRes.json();
           setLeaderboard(leaderboardData);
+        }
+
+        if (historyRes.ok) {
+          const historyData = await historyRes.json();
+          if (Array.isArray(historyData) && historyData.length > 0) {
+            const mappedHistory = historyData.map((h) => ({
+              date: String(h.date || ''),
+              location: String(h.location || 'N/A'),
+              type: String(h.type || 'Whole blood'),
+              recipientType: String(h.recipientType || 'General patient'),
+              status: String(h.status || 'Completed') as DonationRecord['status'],
+              verified: Boolean(h.verified),
+              unitsDonated: Number(h.unitsDonated) || 1,
+            }));
+            setHistory(mappedHistory);
+          }
         }
       } catch {
         setApiError('Could not load live achievement data. Showing cached defaults.');
@@ -122,7 +158,7 @@ export default function AchievementsPage() {
       )}
 
       {/* Points Card */}
-      <div className="bg-gradient-to-r from-red to-red-dark text-white rounded-2xl p-6 relative overflow-hidden">
+      <div className="bg-linear-to-r from-red to-red-dark text-white rounded-2xl p-6 relative overflow-hidden">
         <div className="absolute -right-8 -top-8 w-40 h-40 bg-white/10 rounded-full blur-2xl"></div>
         <div className="absolute -left-8 -bottom-8 w-32 h-32 bg-white/5 rounded-full blur-2xl"></div>
         <div className="relative z-10 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
@@ -143,9 +179,8 @@ export default function AchievementsPage() {
         </div>
       </div>
 
-      {/* Milestone Track */}
-      <div className="card">
-        <h2 className="card-title mb-4">Milestone Progress</h2>
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+        <h2 className="text-lg font-bold text-gray-800 mb-4">Milestone Progress</h2>
         <div className="flex items-center gap-2 overflow-x-auto pb-2">
           {milestones.map((m, i) => (
             <div key={m.label} className="flex items-center gap-2">
@@ -171,26 +206,25 @@ export default function AchievementsPage() {
           {badges.map((badge) => (
             <div
               key={badge.label}
-              className={`card text-center transition-all ${badge.earned ? 'hover:shadow-md' : 'opacity-60 grayscale'}`}
+              className={`bg-white rounded-xl shadow-sm border border-gray-100 p-5 text-center transition-all ${badge.earned ? 'hover:shadow-md' : 'opacity-60 grayscale'}`}
             >
-              <div className={`w-16 h-16 rounded-full flex items-center justify-center text-3xl mx-auto mb-3 ${badge.earned ? 'bg-amber-bg shadow-[0_0_0_4px_var(--color-amber-bg)]' : 'bg-gray-100'}`}>
+              <div className={`w-16 h-16 rounded-full flex items-center justify-center text-3xl mx-auto mb-3 ${badge.earned ? 'bg-yellow-100 text-yellow-600 shadow-[0_0_0_4px_#fef08a]' : 'bg-gray-100'}`}>
                 {badge.icon}
               </div>
               <div className="text-sm font-bold text-gray-800 mb-1">{badge.label}</div>
               <div className="text-[11px] text-gray-500 leading-relaxed mb-2">{badge.description}</div>
               {badge.earned ? (
-                <span className="chip chip-green text-[10px]"><span className="chip-dot"></span>Earned</span>
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold bg-green-100 text-green-700"><span className="w-1.5 h-1.5 rounded-full bg-current"></span>Earned</span>
               ) : (
-                <span className="chip chip-amber text-[10px]"><span className="chip-dot"></span>Locked</span>
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold bg-yellow-100 text-yellow-700"><span className="w-1.5 h-1.5 rounded-full bg-current"></span>Locked</span>
               )}
             </div>
           ))}
         </div>
       </div>
 
-      {/* Leaderboard */}
-      <div className="card">
-        <h2 className="card-title mb-4">Donor Leaderboard — Top 5</h2>
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+        <h2 className="text-lg font-bold text-gray-800 mb-4">Donor Leaderboard — Top 5</h2>
         <div className="flex flex-col gap-2">
           {leaderboard.length > 0 ? (
             leaderboard.map((entry) => {
@@ -232,6 +266,40 @@ export default function AchievementsPage() {
               </div>
             ))
           )}
+        </div>
+      </div>
+
+      {/* Donation History (Default Data) */}
+      <div className="card mt-4">
+        <h2 className="text-lg font-bold text-gray-800 mb-4">Recent Donations Driving Achievements</h2>
+        <div className="overflow-x-auto">
+          <table className="w-full text-[13px] text-left">
+            <thead className="text-[11px] text-gray-400 uppercase border-b border-gray-100">
+              <tr>
+                <th className="pb-3 font-semibold">Date</th>
+                <th className="pb-3 font-semibold">Location</th>
+                <th className="pb-3 font-semibold">Type</th>
+                <th className="pb-3 font-semibold">Recipient</th>
+                <th className="pb-3 font-semibold">Status</th>
+              </tr>
+            </thead>
+            <tbody className="text-gray-800">
+              {history.map((h, i) => (
+                <tr key={i} className="border-b border-gray-50 hover:bg-gray-50/50 transition-colors">
+                  <td className="py-3 font-medium">{new Date(h.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</td>
+                  <td>{h.location || 'N/A'}</td>
+                  <td>{h.type || ''} {h.unitsDonated ? `(${String(h.unitsDonated)}u)` : ''}</td>
+                  <td>{h.recipientType || 'General patient'}</td>
+                  <td>
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold bg-green-100 text-green-700">
+                      <span className="w-1.5 h-1.5 rounded-full bg-current"></span>{h.status || 'N/A'}
+                    </span>
+                    {h.verified ? <span className="ml-2 text-green-600 text-[10px] items-center font-semibold">✓ Verified</span> : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>

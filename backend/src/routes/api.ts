@@ -1,36 +1,82 @@
+import 'dotenv/config';
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
+import crypto from 'crypto';
 import User from '../models/User';
 import SOSAlert from '../models/SOSAlert';
 import mockDonors from '../data/mockDonors';
 import { matchDonors } from '../services/matchingService';
 import { BloodGroup, DonorProfile, PatientInput } from '../types/matching';
 import { isEmailServiceConfigured, sendEmail } from '../services/emailService';
+import { isCompatible } from '../utils/bloodCompatibility';
+import { calculateDistance } from '../utils/haversine';
+import { calculateScore } from '../services/scoring';
+import { sendSMS, sendWhatsApp } from '../services/notify';
 
 const router = Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'secret';
+function resolveJwtSecret(): string {
+  const configuredSecret = process.env.JWT_SECRET;
+  const isProd = process.env.NODE_ENV === 'production';
+
+  if (configuredSecret && configuredSecret.length >= 32) {
+    return configuredSecret;
+  }
+
+  if (isProd) {
+    throw new Error('JWT_SECRET must be configured and at least 32 characters long.');
+  }
+
+  const devSecret = crypto.randomBytes(48).toString('hex');
+  console.warn('JWT_SECRET is missing/short. Using an ephemeral development-only secret for this process.');
+  return devSecret;
+}
+
+const JWT_SECRET = resolveJwtSecret();
 const bloodGroups: BloodGroup[] = ['O-', 'O+', 'A-', 'A+', 'B-', 'B+', 'AB-', 'AB+'];
+const ALLOW_DEV_AUTH_BYPASS = process.env.ALLOW_DEV_AUTH_BYPASS === 'true' && process.env.NODE_ENV !== 'production';
+
+type AuthenticatedRequest = Request & { user?: any; io?: any };
 
 // JWT Auth Middleware
 export const authMiddleware = async (req: Request, res: Response, next: Function) => {
   try {
+    const reqWithUser = req as AuthenticatedRequest;
     const token = req.headers.authorization?.split(' ')[1];
     if (!token) {
-      // Mock bypass for development if auth token is missing, picking default patient
-      const mockPatient = await User.findOne({ role: 'patient' });
-      (req as any).user = mockPatient;
-      return next();
+      if (ALLOW_DEV_AUTH_BYPASS) {
+        const devUserId = req.headers['x-dev-user-id'];
+        if (typeof devUserId === 'string' && mongoose.Types.ObjectId.isValid(devUserId)) {
+          const devUser = await User.findById(devUserId).exec();
+          if (devUser) {
+            reqWithUser.user = devUser;
+            return next();
+          }
+        }
+      }
+      return res.status(401).json({ error: 'Authorization token is required' });
     }
     const decoded = jwt.verify(token, JWT_SECRET) as any;
     const user = await User.findById(decoded.id);
     if (!user) return res.status(401).json({ error: 'User not found' });
-    (req as any).user = user;
+    reqWithUser.user = user;
     next();
   } catch (error) {
     res.status(401).json({ error: 'Unauthorized' });
   }
+};
+
+const requireRole = (...roles: Array<'patient' | 'donor' | 'admin'>) => (
+  req: Request,
+  res: Response,
+  next: Function
+) => {
+  const user = (req as AuthenticatedRequest).user;
+  if (!user || !roles.includes(user.role)) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  return next();
 };
 
 function isBloodGroup(value: unknown): value is BloodGroup {
@@ -91,9 +137,10 @@ function mapUserToDonorProfile(user: {
 
 // Register a user (simple auth layer)
 router.post('/auth/register', async (req: Request, res: Response) => {
-  const { name, email, password, role } = req.body as {
+  const { name, email, phone, password, role } = req.body as {
     name?: string;
     email?: string;
+    phone?: string;
     password?: string;
     role?: string;
   };
@@ -112,6 +159,7 @@ router.post('/auth/register', async (req: Request, res: Response) => {
     const newUser = await User.create({
       name,
       email: email.toLowerCase(),
+      phone,
       password: hashedPassword,
       role,
     });
@@ -161,7 +209,9 @@ router.post('/auth/login', async (req: Request, res: Response) => {
 // Get all donors for the map and list
 router.get('/donors', async (req: Request, res: Response) => {
   try {
-    const donors = await User.find({ role: 'donor' }).exec();
+    const donors = await User.find({ role: 'donor' })
+      .select('name role bloodGroup location avail lastDonated donationsCount score initials')
+      .exec();
     res.json(donors);
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch donors' });
@@ -169,7 +219,7 @@ router.get('/donors', async (req: Request, res: Response) => {
 });
 
 // Get ALL users (for admin)
-router.get('/users', async (req: Request, res: Response) => {
+router.get('/users', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
   try {
     const users = await User.find().select('-password').exec();
     res.json(users);
@@ -179,10 +229,22 @@ router.get('/users', async (req: Request, res: Response) => {
 });
 
 // Update a user
-router.put('/users/:id', async (req: Request, res: Response) => {
-  const { id } = req.params;
+router.put('/users/:id', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
+  const id = String(req.params.id || '');
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ error: 'Invalid user id' });
+  }
+
+  const allowedKeys = new Set(['name', 'email', 'role', 'bloodGroup', 'location', 'avail', 'lastDonated', 'donationsCount', 'score', 'initials']);
+  const updates = Object.fromEntries(
+    Object.entries(req.body || {}).filter(([key]) => allowedKeys.has(key))
+  );
+
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({ error: 'No allowed fields provided for update' });
+  }
   try {
-    const updated = await User.findByIdAndUpdate(id, req.body, { new: true }).select('-password').exec();
+    const updated = await User.findByIdAndUpdate(id, updates, { new: true, runValidators: true }).select('-password').exec();
     if (!updated) return res.status(404).json({ error: 'User not found' });
     res.json(updated);
   } catch (error) {
@@ -191,8 +253,11 @@ router.put('/users/:id', async (req: Request, res: Response) => {
 });
 
 // Delete a user
-router.delete('/users/:id', async (req: Request, res: Response) => {
-  const { id } = req.params;
+router.delete('/users/:id', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
+  const id = String(req.params.id || '');
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ error: 'Invalid user id' });
+  }
   try {
     const deleted = await User.findByIdAndDelete(id).exec();
     if (!deleted) return res.status(404).json({ error: 'User not found' });
@@ -207,7 +272,10 @@ import Donation from '../models/Donation';
 import Achievement from '../models/Achievement';
 
 // Seed mock data
-router.post('/seed', async (req: Request, res: Response) => {
+router.post('/seed', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'Not found' });
+  }
   try {
     await User.deleteMany({});
     await DonorProfileModel.deleteMany({});
@@ -257,13 +325,9 @@ router.post('/seed', async (req: Request, res: Response) => {
 });
 
 // Create SOS Alert
-router.post('/sos', authMiddleware, async (req: Request, res: Response) => {
+router.post('/sos', authMiddleware, requireRole('patient'), async (req: Request, res: Response) => {
   const patient = (req as any).user;
   const io = (req as any).io;
-
-  if (patient.role !== 'patient') {
-    return res.status(403).json({ error: 'Only patients can send SOS' });
-  }
 
   try {
     const lastSOS = await SOSAlert.findOne({ patientId: patient._id }).sort({ createdAt: -1 });
@@ -272,16 +336,37 @@ router.post('/sos', authMiddleware, async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Wait before sending another SOS' });
     }
 
-    // Identify nearby compatible donors
-    const donorQuery: any = { role: 'donor', avail: { $ne: 'Offline' } };
-    if (patient.bloodGroup) {
-      // Basic compatibility fallback logic instead of complex mapping object
-      donorQuery.bloodGroup = patient.bloodGroup;
+    const patientCoords = patient.location?.coordinates;
+    if (!patientCoords || patientCoords.length < 2) {
+      return res.status(400).json({ error: 'Patient location is required for SOS matching' });
     }
+    const [patientLng, patientLat] = patientCoords;
 
-    const donors = await User.find(donorQuery).limit(10).exec();
+    const donors = await User.find({
+      role: 'donor',
+      avail: 'Available',
+      location: {
+        $near: {
+          $geometry: { type: 'Point', coordinates: [patientLng, patientLat] },
+          $maxDistance: 15000,
+        },
+      },
+    })
+      .limit(25)
+      .exec();
 
-    if (donors.length === 0) {
+    const compatibleDonorsObjs = donors
+      .filter((donor) => {
+        if (!isBloodGroup(patient.bloodGroup) || !isBloodGroup(donor.bloodGroup)) return false;
+        return isCompatible(donor.bloodGroup, patient.bloodGroup);
+      })
+      .map(d => ({ donor: d, score: calculateScore(d, patient) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5);
+      
+    const compatibleDonors = compatibleDonorsObjs.map(d => d.donor);
+
+    if (compatibleDonors.length === 0) {
       return res.status(404).json({ error: 'No compatible donors found nearby' });
     }
 
@@ -294,16 +379,38 @@ router.post('/sos', authMiddleware, async (req: Request, res: Response) => {
       deliveryLogs: [],
     });
 
-    donors.forEach((donor) => {
+    compatibleDonors.forEach((donor) => {
       io.to(donor._id.toString()).emit('sos-alert', {
         sosId: alert._id,
         bloodGroup: alert.bloodGroup,
         location: alert.location,
-        hospital: alert.hospital
+        hospital: alert.hospital,
+        patientName: patient.name || 'Patient',
+        requestType: 'sos',
       });
+      
+      if (donor.phone) {
+        const msg = `🚨 URGENT: Blood needed (${alert.bloodGroup}) near you. Please respond ASAP in ThalAI Connect app.`;
+        sendSMS(donor.phone, msg);
+        sendWhatsApp(donor.phone, msg);
+      }
     });
 
-    const socketLogs = donors.map((donor) => ({
+    // Auto-retry / Escalation logic (30 seconds)
+    setTimeout(async () => {
+      try {
+         const currentSos = await SOSAlert.findById(alert._id);
+         if (currentSos && currentSos.status === 'active') {
+           // Notify hospital explicitly via Whatsapp
+           const hospitalPhone = process.env.HOSPITAL_PHONE || "+10000000000";
+           await sendWhatsApp(hospitalPhone, `Emergency blood (${currentSos.bloodGroup}) required at ${currentSos.hospital}. Escalate internally.`);
+         }
+      } catch(err) {
+         console.error("Auto-retry error:", err);
+      }
+    }, 30000);
+
+    const socketLogs = compatibleDonors.map((donor) => ({
       channel: 'socket' as const,
       recipientUserId: donor._id,
       recipientEmail: typeof donor.email === 'string' ? donor.email : undefined,
@@ -313,7 +420,7 @@ router.post('/sos', authMiddleware, async (req: Request, res: Response) => {
     }));
     alert.deliveryLogs.push(...socketLogs);
 
-    const emailPromises = donors.map((donor) => {
+    const emailPromises = compatibleDonors.map((donor) => {
       const recipientEmail = typeof donor.email === 'string' ? donor.email : '';
       const donorName = donor.name || 'Donor';
 
@@ -327,7 +434,7 @@ router.post('/sos', authMiddleware, async (req: Request, res: Response) => {
 
     const emailResults = await Promise.all(emailPromises);
     emailResults.forEach((result, index) => {
-      const donor = donors[index];
+      const donor = compatibleDonors[index];
       alert.deliveryLogs.push({
         channel: 'email',
         recipientUserId: donor._id,
@@ -347,7 +454,7 @@ router.post('/sos', authMiddleware, async (req: Request, res: Response) => {
     res.status(201).json({
       success: true,
       alert,
-      message: `SOS sent to ${donors.length} donors`,
+      message: `SOS sent to ${compatibleDonors.length} compatible donors`,
       emailDelivery: {
         configured: isEmailServiceConfigured(),
         attempted: emailResults.length,
@@ -363,7 +470,7 @@ router.post('/sos', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // Atomic Response to SOS
-router.post('/sos/respond', authMiddleware, async (req: Request, res: Response) => {
+router.post('/sos/respond', authMiddleware, requireRole('donor'), async (req: Request, res: Response) => {
   const { sosId, response } = req.body;
   const donor = (req as any).user;
   const io = (req as any).io;
@@ -380,15 +487,11 @@ router.post('/sos/respond', authMiddleware, async (req: Request, res: Response) 
     return res.status(401).json({ error: 'Unauthorized donor context' });
   }
 
-  if (donor.role !== 'donor') {
-    return res.status(403).json({ error: 'Only donors can respond to SOS alerts' });
-  }
-
   try {
     const sos = await SOSAlert.findOneAndUpdate(
       {
         _id: sosId,
-        status: 'active',
+        status: { $in: ['active', 'dispatched'] },
         acceptedDonor: null,
         'responders.donorId': { $ne: donor._id },
         $or: [{ targetedDonor: null }, { targetedDonor: donor._id }],
@@ -414,10 +517,12 @@ router.post('/sos/respond', authMiddleware, async (req: Request, res: Response) 
     }
 
     if (response === 'accepted') {
-      io?.to(sos.patientId.toString()).emit('sos-accepted', {
-        donorId: donor._id,
-        donorName: donor.name
-      });
+      if (sos.patientId) {
+        io?.to(sos.patientId.toString()).emit('sos-accepted', {
+          donorId: donor._id,
+          donorName: donor.name
+        });
+      }
 
       if (!Array.isArray(sos.deliveryLogs)) {
         sos.deliveryLogs = [];
@@ -425,7 +530,7 @@ router.post('/sos/respond', authMiddleware, async (req: Request, res: Response) 
 
       sos.deliveryLogs.push({
         channel: 'socket',
-        recipientUserId: sos.patientId,
+        recipientUserId: sos.patientId || undefined,
         event: 'sos-accepted',
         status: 'sent',
         createdAt: new Date(),
@@ -610,12 +715,7 @@ router.post('/patient/donation-request', authMiddleware, async (req: Request, re
   }
 });
 
-router.get('/admin/sos-delivery-logs', authMiddleware, async (req: Request, res: Response) => {
-  const user = (req as any).user;
-  if (user.role !== 'admin') {
-    return res.status(403).json({ error: 'Only admins can access SOS delivery logs' });
-  }
-
+router.get('/admin/sos-delivery-logs', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
   try {
     const alerts = await SOSAlert.find()
       .sort({ createdAt: -1 })
@@ -672,7 +772,7 @@ router.get('/admin/sos-delivery-logs', authMiddleware, async (req: Request, res:
 });
 
 // Get all SOS alerts (Mocked fetch)
-router.get('/sos', async (req: Request, res: Response) => {
+router.get('/sos', authMiddleware, async (req: Request, res: Response) => {
   try {
     const alerts = await SOSAlert.find().sort({ createdAt: -1 }).populate('patientId', 'name bloodGroup').exec();
     res.json(alerts);

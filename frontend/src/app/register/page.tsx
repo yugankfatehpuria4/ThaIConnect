@@ -8,6 +8,7 @@ export default function RegisterPage() {
   const [formData, setFormData] = useState({
     name: '',
     email: '',
+    phone: '',
     password: '',
     role: 'patient' as 'patient' | 'donor' | 'admin',
   });
@@ -90,6 +91,22 @@ export default function RegisterPage() {
               onChange={handleChange}
               className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-red focus:border-red transition-colors"
               placeholder="Enter your email"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="phone" className="block text-sm font-medium text-gray-700 mb-1">
+              Mobile Number (For Emergency Alerts)
+            </label>
+            <input
+              type="tel"
+              id="phone"
+              name="phone"
+              required
+              value={formData.phone}
+              onChange={handleChange}
+              className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-red focus:border-red transition-colors"
+              placeholder="+1234567890"
             />
           </div>
 

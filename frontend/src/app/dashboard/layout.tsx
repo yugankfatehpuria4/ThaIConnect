@@ -6,6 +6,7 @@
 import Sidebar from '@/components/Sidebar';
 import Topbar from '@/components/Topbar';
 import SOSModal from '@/components/SOSModal';
+import SOSPopup from '@/components/SOSPopup';
 import { SocketProvider } from '@/context/SocketContext';
 
 type UserRole = 'patient' | 'donor' | 'admin';
@@ -25,9 +26,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   useEffect(() => {
     const localRole = typeof window !== 'undefined' ? localStorage.getItem('role') : null;
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
     const userRole = isUserRole(localRole) ? localRole : null;
 
-    if (!userRole) {
+    if (!userRole || !token) {
       router.replace('/login');
       return;
     }
@@ -61,6 +63,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </main>
         </div>
         <SOSModal isOpen={sosOpen} onCloseAction={() => setSosOpen(false)} />
+        <SOSPopup />
       </div>
     </SocketProvider>
   );

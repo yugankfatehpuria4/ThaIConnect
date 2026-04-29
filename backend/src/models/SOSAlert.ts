@@ -1,14 +1,17 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
 export interface ISOSAlert extends Document {
-  patientId: mongoose.Types.ObjectId;
+  patientId?: mongoose.Types.ObjectId | null;
   bloodGroup: string;
   location: {
     type: string;
     coordinates: number[];
   };
   hospital?: string;
-  status: 'active' | 'resolved' | 'expired';
+  status: 'active' | 'resolved' | 'expired' | 'dispatched';
+  donorsNotified?: mongoose.Types.ObjectId[];
+  whatsappSent?: boolean;
+  hospitalNotified?: boolean;
   responders: {
     donorId: mongoose.Types.ObjectId;
     response: 'accepted' | 'rejected';
@@ -33,14 +36,17 @@ export interface ISOSAlert extends Document {
 
 const sosSchema: Schema = new Schema(
   {
-    patientId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    patientId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: false, default: null },
     bloodGroup: { type: String, required: true },
     location: {
       type: { type: String, enum: ['Point'], default: 'Point' },
       coordinates: { type: [Number], required: true }
     },
     hospital: { type: String },
-    status: { type: String, enum: ['active', 'resolved', 'expired'], default: 'active' },
+    status: { type: String, enum: ['active', 'resolved', 'expired', 'dispatched'], default: 'active' },
+    donorsNotified: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    whatsappSent: { type: Boolean, default: false },
+    hospitalNotified: { type: Boolean, default: false },
     responders: [
       {
         donorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },

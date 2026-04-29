@@ -1,6 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { Users, Search, Filter, Trash2, Edit3, ChevronDown, Shield, AlertCircle, CheckCircle2, X } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 
 type User = {
   _id: string;
@@ -15,12 +16,14 @@ type User = {
 };
 
 export default function AdminUsersPage() {
+  const router = useRouter();
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState('all');
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [accessError, setAccessError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchUsers();
@@ -28,8 +31,30 @@ export default function AdminUsersPage() {
 
   const fetchUsers = () => {
     setLoading(true);
-    fetch('/api/users')
-      .then(res => res.json())
+    const token = localStorage.getItem('token') || '';
+    if (!token) {
+      setAccessError('Please login as admin to view users.');
+      setLoading(false);
+      router.replace('/login');
+      return;
+    }
+
+    fetch('/api/users', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(async (res) => {
+        if (res.status === 401) {
+          setAccessError('Session expired. Please login again.');
+          localStorage.removeItem('token');
+          router.replace('/login');
+          return [];
+        }
+        if (res.status === 403) {
+          setAccessError('Admin access required for this page.');
+          return [];
+        }
+        return res.json();
+      })
       .then(data => {
         if (Array.isArray(data)) setUsers(data);
       })
@@ -39,7 +64,14 @@ export default function AdminUsersPage() {
 
   const handleDelete = async (id: string) => {
     try {
-      await fetch(`/api/users/${id}`, { method: 'DELETE' });
+      const token = localStorage.getItem('token') || '';
+      const res = await fetch(`/api/users/${id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        throw new Error('Delete failed');
+      }
       setUsers(prev => prev.filter(u => u._id !== id));
       setDeleteConfirm(null);
     } catch (e) {
@@ -49,9 +81,13 @@ export default function AdminUsersPage() {
 
   const handleUpdateRole = async (id: string, newRole: string) => {
     try {
+      const token = localStorage.getItem('token') || '';
       const res = await fetch(`/api/users/${id}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
         body: JSON.stringify({ role: newRole }),
       });
       if (res.ok) {
@@ -101,25 +137,28 @@ export default function AdminUsersPage() {
 
       {/* Stats */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="bg-white border border-gray-100 rounded-[12px] p-4">
+        <div className="bg-white border border-gray-100 rounded-sm p-4">
           <div className="text-2xl font-bold text-gray-800">{stats.total}</div>
           <div className="text-xs text-gray-400 font-medium">Total Users</div>
         </div>
-        <div className="bg-white border border-gray-100 rounded-[12px] p-4">
+        <div className="bg-white border border-gray-100 rounded-sm p-4">
           <div className="text-2xl font-bold text-amber">{stats.patients}</div>
           <div className="text-xs text-gray-400 font-medium">Patients</div>
         </div>
-        <div className="bg-white border border-gray-100 rounded-[12px] p-4">
+        <div className="bg-white border border-gray-100 rounded-sm p-4">
           <div className="text-2xl font-bold text-blue">{stats.donors}</div>
           <div className="text-xs text-gray-400 font-medium">Donors</div>
         </div>
-        <div className="bg-white border border-gray-100 rounded-[12px] p-4">
+        <div className="bg-white border border-gray-100 rounded-sm p-4">
           <div className="text-2xl font-bold text-green">{stats.admins}</div>
           <div className="text-xs text-gray-400 font-medium">Administrators</div>
         </div>
       </div>
 
       {/* Filters */}
+      {accessError && (
+        <div className="chip chip-red w-fit">{accessError}</div>
+      )}
       <div className="card">
         <div className="flex flex-col md:flex-row gap-3">
           <div className="relative flex-1">

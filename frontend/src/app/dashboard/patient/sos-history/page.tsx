@@ -1,6 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { AlertCircle, CheckCircle2, Clock, MapPin, Phone, ChevronDown } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 
 type SOSAlert = {
   _id: string;
@@ -37,13 +38,33 @@ function normalizeStatus(status: unknown): string {
 }
 
 export default function SOSHistoryPage() {
+  const router = useRouter();
   const [alerts, setAlerts] = useState<SOSAlert[]>(mockAlerts);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [accessError, setAccessError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch('/api/sos')
-      .then(res => res.json())
+    const token = localStorage.getItem('token') || '';
+    if (!token) {
+      setAccessError('Please login to view SOS history.');
+      setLoading(false);
+      router.replace('/login');
+      return;
+    }
+
+    fetch('/api/sos', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(async (res) => {
+        if (res.status === 401) {
+          setAccessError('Session expired. Please login again.');
+          localStorage.removeItem('token');
+          router.replace('/login');
+          return [];
+        }
+        return res.json();
+      })
       .then(data => {
         if (Array.isArray(data) && data.length > 0) {
           const normalizedAlerts: SOSAlert[] = data.map((item: any) => ({
@@ -59,7 +80,7 @@ export default function SOSHistoryPage() {
       })
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, []);
+  }, [router]);
 
   const stats = {
     total: alerts.length,
@@ -97,6 +118,9 @@ export default function SOSHistoryPage() {
       </div>
 
       {/* Alert List */}
+      {accessError && (
+        <div className="chip chip-red w-fit">{accessError}</div>
+      )}
       {loading ? (
         <div className="card flex items-center justify-center py-12">
           <div className="w-8 h-8 border-3 border-red-glow border-t-red rounded-full animate-spin"></div>
