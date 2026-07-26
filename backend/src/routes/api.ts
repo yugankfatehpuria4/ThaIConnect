@@ -4,8 +4,11 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import crypto from 'crypto';
+import rateLimit from 'express-rate-limit';
+import { z } from 'zod';
 import User from '../models/User';
 import SOSAlert from '../models/SOSAlert';
+import Appointment from '../models/Appointment';
 import mockDonors from '../data/mockDonors';
 import { matchDonors } from '../services/matchingService';
 import { BloodGroup, DonorProfile, PatientInput } from '../types/matching';
@@ -16,6 +19,8 @@ import { calculateScore } from '../services/scoring';
 import { sendSMS, sendWhatsApp } from '../services/notify';
 
 const router = Router();
+
+// ─── JWT Secret ──────────────────────────────────────────────────────────────
 function resolveJwtSecret(): string {
   const configuredSecret = process.env.JWT_SECRET;
   const isProd = process.env.NODE_ENV === 'production';
@@ -28,22 +33,128 @@ function resolveJwtSecret(): string {
     throw new Error('JWT_SECRET must be configured and at least 32 characters long.');
   }
 
-  const devSecret = crypto.randomBytes(48).toString('hex');
-  console.warn('JWT_SECRET is missing/short. Using an ephemeral development-only secret for this process.');
-  return devSecret;
+  console.warn('JWT_SECRET is missing/short. Using ephemeral dev secret.');
+  return crypto.randomBytes(48).toString('hex');
 }
 
 const JWT_SECRET = resolveJwtSecret();
 const bloodGroups: BloodGroup[] = ['O-', 'O+', 'A-', 'A+', 'B-', 'B+', 'AB-', 'AB+'];
-const ALLOW_DEV_AUTH_BYPASS = process.env.ALLOW_DEV_AUTH_BYPASS === 'true' && process.env.NODE_ENV !== 'production';
 
+// ─── Auth cookie (httpOnly — JWT is never exposed to browser JavaScript) ─────
+const AUTH_COOKIE = 'token';
+const IS_PROD = process.env.NODE_ENV === 'production';
+const AUTH_COOKIE_MAX_AGE = 24 * 60 * 60 * 1000; // 24h — matches JWT expiry
+
+function authCookieOptions() {
+  return {
+    httpOnly: true,
+    secure: IS_PROD,          // require HTTPS in production
+    sameSite: 'lax' as const, // API is same-origin via the Next.js proxy
+    path: '/',
+  };
+}
+
+function issueAuthCookie(res: Response, token: string) {
+  res.cookie(AUTH_COOKIE, token, { ...authCookieOptions(), maxAge: AUTH_COOKIE_MAX_AGE });
+}
+
+// ─── Dev auth bypass — NEVER allowed in production ───────────────────────────
+const ALLOW_DEV_AUTH_BYPASS =
+  process.env.ALLOW_DEV_AUTH_BYPASS === 'true' &&
+  process.env.NODE_ENV !== 'production' &&
+  process.env.NODE_ENV !== 'staging';
+
+// ─── Rate limiters ────────────────────────────────────────────────────────────
+export const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20,
+  message: { error: 'Too many attempts. Please try again in 15 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+export const sosLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 5,
+  message: { error: 'Too many SOS requests. Please wait before trying again.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+export const generalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 100,
+  message: { error: 'Too many requests. Please slow down.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// ─── Zod validation schemas ───────────────────────────────────────────────────
+const RegisterSchema = z.object({
+  name: z.string().min(2).max(100),
+  email: z.string().email(),
+  phone: z.string().optional(),
+  password: z.string().min(8).max(128),
+  // admin role is NOT allowed via self-registration
+  role: z.enum(['patient', 'donor']),
+});
+
+const LoginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1),
+});
+
+const SosRespondSchema = z.object({
+  sosId: z.string().refine((v) => mongoose.Types.ObjectId.isValid(v), 'Invalid sosId'),
+  response: z.enum(['accepted', 'rejected']),
+});
+
+const ObjectIdSchema = z.string().refine((v) => mongoose.Types.ObjectId.isValid(v), 'Invalid id');
+
+const DonationRequestSchema = z.object({
+  donorId: ObjectIdSchema,
+  hospital: z.string().trim().min(1).max(200).optional(),
+  note: z.string().trim().max(500).optional(),
+});
+
+// Medical-data validation — reject clinically impossible values instead of
+// storing them (a bad hb/units corrupts transfusion-cycle predictions).
+const TimelineEntrySchema = z.object({
+  hb: z.coerce.number().min(1).max(25),          // g/dL, physiologic range
+  units: z.coerce.number().int().min(1).max(10),
+  hospital: z.string().trim().min(1).max(200),
+});
+
+const AppointmentInputSchema = z.object({
+  date: z.string().refine((s) => !Number.isNaN(new Date(s).getTime()), 'A valid date is required'),
+  time: z.string().trim().max(20).optional(),
+  type: z.enum(['transfusion', 'checkup', 'consultation']),
+  hospital: z.string().trim().min(1).max(200),
+  doctor: z.string().trim().max(120).optional(),
+  notes: z.string().trim().max(1000).optional(),
+});
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 type AuthenticatedRequest = Request & { user?: any; io?: any };
 
-// JWT Auth Middleware
+// Bounded pagination for list endpoints — caps result sets so a growing table
+// can't cause memory spikes / slow responses. Keeps the array response shape,
+// so existing clients keep working; they can opt into ?limit= & ?skip=.
+function parsePagination(req: Request, defaultLimit = 100, maxLimit = 200) {
+  const rawLimit = Number(req.query.limit);
+  const rawSkip = Number(req.query.skip);
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), maxLimit) : defaultLimit;
+  const skip = Number.isFinite(rawSkip) && rawSkip > 0 ? Math.floor(rawSkip) : 0;
+  return { limit, skip };
+}
+
+// ─── Auth Middleware ──────────────────────────────────────────────────────────
 export const authMiddleware = async (req: Request, res: Response, next: Function) => {
   try {
     const reqWithUser = req as AuthenticatedRequest;
-    const token = req.headers.authorization?.split(' ')[1];
+    // Prefer the httpOnly cookie; fall back to a Bearer header for API tooling.
+    const token = (req as any).cookies?.[AUTH_COOKIE] || req.headers.authorization?.split(' ')[1];
+
     if (!token) {
       if (ALLOW_DEV_AUTH_BYPASS) {
         const devUserId = req.headers['x-dev-user-id'];
@@ -57,12 +168,13 @@ export const authMiddleware = async (req: Request, res: Response, next: Function
       }
       return res.status(401).json({ error: 'Authorization token is required' });
     }
+
     const decoded = jwt.verify(token, JWT_SECRET) as any;
     const user = await User.findById(decoded.id);
     if (!user) return res.status(401).json({ error: 'User not found' });
     reqWithUser.user = user;
     next();
-  } catch (error) {
+  } catch {
     res.status(401).json({ error: 'Unauthorized' });
   }
 };
@@ -70,7 +182,7 @@ export const authMiddleware = async (req: Request, res: Response, next: Function
 const requireRole = (...roles: Array<'patient' | 'donor' | 'admin'>) => (
   req: Request,
   res: Response,
-  next: Function
+  next: Function,
 ) => {
   const user = (req as AuthenticatedRequest).user;
   if (!user || !roles.includes(user.role)) {
@@ -79,51 +191,80 @@ const requireRole = (...roles: Array<'patient' | 'donor' | 'admin'>) => (
   return next();
 };
 
+// Verify a short-lived Socket.IO handshake ticket (see /auth/socket-ticket).
+// Returns the authenticated identity or null — the socket layer trusts this,
+// never a client-supplied user id.
+export function verifySocketTicket(token: string): { id: string; role: string } | null {
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    if (decoded?.purpose !== 'socket' || !decoded?.id) return null;
+    return { id: String(decoded.id), role: String(decoded.role) };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 function isBloodGroup(value: unknown): value is BloodGroup {
   return typeof value === 'string' && bloodGroups.includes(value as BloodGroup);
 }
 
 function isPatientInput(body: unknown): body is PatientInput {
   if (!body || typeof body !== 'object') return false;
-  const candidate = body as { bloodGroup?: unknown; location?: { lat?: unknown; lng?: unknown } };
-
+  const c = body as { bloodGroup?: unknown; location?: { lat?: unknown; lng?: unknown } };
   return (
-    isBloodGroup(candidate.bloodGroup) &&
-    typeof candidate.location?.lat === 'number' &&
-    typeof candidate.location?.lng === 'number'
+    isBloodGroup(c.bloodGroup) &&
+    typeof c.location?.lat === 'number' &&
+    typeof c.location?.lng === 'number'
   );
 }
 
-function parseQueryOrBody(req: Request): { bloodGroup?: string; lat?: number; lng?: number; requesterRole?: string } {
-  const rawBloodGroup = req.query.bloodGroup || (req.body as any)?.bloodGroup;
+function parseQueryOrBody(req: Request) {
+  const rawBG = req.query.bloodGroup || (req.body as any)?.bloodGroup;
   const rawLat = req.query.lat || (req.body as any)?.lat;
   const rawLng = req.query.lng || (req.body as any)?.lng;
-  const rawRequesterRole = req.query.requesterRole || (req.body as any)?.requesterRole;
-
+  const rawRole = req.query.requesterRole || (req.body as any)?.requesterRole;
   return {
-    bloodGroup: rawBloodGroup != null ? String(rawBloodGroup).toUpperCase() : undefined,
+    bloodGroup: rawBG != null ? String(rawBG).toUpperCase() : undefined,
     lat: rawLat != null ? Number(rawLat) : undefined,
     lng: rawLng != null ? Number(rawLng) : undefined,
-    requesterRole: rawRequesterRole != null ? String(rawRequesterRole).toLowerCase() : undefined,
+    requesterRole: rawRole != null ? String(rawRole).toLowerCase() : undefined,
   };
 }
 
-function mapUserToDonorProfile(user: {
-  _id: unknown;
-  name: string;
-  bloodGroup?: string;
-  location?: { coordinates?: number[] };
-  avail?: 'Available' | 'Maybe' | 'Offline';
-  lastDonated?: Date;
-  score?: number;
-}): DonorProfile | null {
+function escapeHtml(value: unknown): string {
+  const chars: Record<string, string> = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  };
+
+  return String(value ?? '').replace(/[&<>"']/g, (char) => chars[char]);
+}
+
+function getAiServiceConfig() {
+  const baseUrl = (process.env.AI_SERVICE_URL || (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:5001')).trim();
+  const apiKey = (process.env.AI_SERVICE_API_KEY || '').trim();
+
+  if (!baseUrl) {
+    throw new Error('AI_SERVICE_URL must be configured.');
+  }
+
+  if (!apiKey && process.env.NODE_ENV === 'production') {
+    throw new Error('AI_SERVICE_API_KEY must be configured in production.');
+  }
+
+  return { baseUrl: baseUrl.replace(/\/$/, ''), apiKey };
+}
+
+function mapUserToDonorProfile(user: any): DonorProfile | null {
   if (!isBloodGroup(user.bloodGroup)) return null;
   const coordinates = user.location?.coordinates;
   if (!coordinates || coordinates.length < 2) return null;
-
   const [lng, lat] = coordinates;
   if (typeof lat !== 'number' || typeof lng !== 'number') return null;
-
   return {
     id: String(user._id),
     name: user.name,
@@ -135,19 +276,16 @@ function mapUserToDonorProfile(user: {
   };
 }
 
-// Register a user (simple auth layer)
-router.post('/auth/register', async (req: Request, res: Response) => {
-  const { name, email, phone, password, role } = req.body as {
-    name?: string;
-    email?: string;
-    phone?: string;
-    password?: string;
-    role?: string;
-  };
+// ─── Auth Routes ──────────────────────────────────────────────────────────────
 
-  if (!name || !email || !password || !role || !['patient', 'donor', 'admin'].includes(role)) {
-    return res.status(400).json({ error: 'name, email, password, and role (patient|donor|admin) are required' });
+// Register — admin role blocked from self-registration
+router.post('/auth/register', authLimiter, async (req: Request, res: Response) => {
+  const parsed = RegisterSchema.safeParse(req.body);
+  if (!parsed.success) {
+    const issues = parsed.error.issues ?? (parsed.error as any).errors ?? [];
+    return res.status(400).json({ error: issues[0]?.message ?? 'Invalid input' });
   }
+  const { name, email, phone, password, role } = parsed.data;
 
   try {
     const existing = await User.findOne({ email: email.toLowerCase() }).exec();
@@ -155,7 +293,7 @@ router.post('/auth/register', async (req: Request, res: Response) => {
       return res.status(409).json({ error: 'User with this email already exists' });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(password, 12);
     const newUser = await User.create({
       name,
       email: email.toLowerCase(),
@@ -165,10 +303,10 @@ router.post('/auth/register', async (req: Request, res: Response) => {
     });
 
     const token = jwt.sign({ id: newUser._id, role: newUser.role }, JWT_SECRET, { expiresIn: '24h' });
+    issueAuthCookie(res, token);
     return res.status(201).json({
       message: 'User registered successfully',
       user: { id: newUser._id, name: newUser.name, role: newUser.role, email: newUser.email },
-      token,
     });
   } catch (error) {
     console.error('Register error:', error);
@@ -176,12 +314,13 @@ router.post('/auth/register', async (req: Request, res: Response) => {
   }
 });
 
-// Login a user
-router.post('/auth/login', async (req: Request, res: Response) => {
-  const { email, password } = req.body as { email?: string; password?: string };
-  if (!email || !password) {
+// Login
+router.post('/auth/login', authLimiter, async (req: Request, res: Response) => {
+  const parsed = LoginSchema.safeParse(req.body);
+  if (!parsed.success) {
     return res.status(400).json({ error: 'email and password are required' });
   }
+  const { email, password } = parsed.data;
 
   try {
     const user = await User.findOne({ email: email.toLowerCase() }).exec();
@@ -195,10 +334,10 @@ router.post('/auth/login', async (req: Request, res: Response) => {
     }
 
     const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '24h' });
+    issueAuthCookie(res, token);
     return res.json({
       message: 'Login successful',
       user: { id: user._id, name: user.name, role: user.role, email: user.email },
-      token,
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -206,40 +345,92 @@ router.post('/auth/login', async (req: Request, res: Response) => {
   }
 });
 
-// Get all donors for the map and list
-router.get('/donors', async (req: Request, res: Response) => {
+// Logout — clears the auth cookie so the session ends server-side too.
+router.post('/auth/logout', (_req: Request, res: Response) => {
+  res.clearCookie(AUTH_COOKIE, authCookieOptions());
+  return res.json({ message: 'Logged out' });
+});
+
+// Current session — lets the frontend confirm auth and fetch the user record
+// without any token living in JavaScript.
+router.get('/auth/me', authMiddleware, (req: Request, res: Response) => {
+  const user = (req as AuthenticatedRequest).user;
+  return res.json({ user: { id: user._id, name: user.name, role: user.role, email: user.email } });
+});
+
+// Short-lived ticket to authenticate the (cross-origin) Socket.IO handshake.
+// The httpOnly session cookie can't reach the socket's origin, so we mint a
+// 60-second, single-purpose token the client passes in the handshake `auth`.
+router.get('/auth/socket-ticket', authMiddleware, (req: Request, res: Response) => {
+  const user = (req as AuthenticatedRequest).user;
+  const ticket = jwt.sign(
+    { id: user._id, role: user.role, purpose: 'socket' },
+    JWT_SECRET,
+    { expiresIn: '60s' },
+  );
+  return res.json({ ticket });
+});
+
+// Save the signed-in user's real location. Registration doesn't collect it, so
+// without this a patient can't send an SOS (needs an origin) and a donor is
+// never matched by the $near query. The frontend calls this once it has the
+// browser geolocation.
+const LocationSchema = z.object({
+  lat: z.coerce.number().min(-90).max(90),
+  lng: z.coerce.number().min(-180).max(180),
+});
+router.post('/me/location', authMiddleware, async (req: Request, res: Response) => {
+  const parsed = LocationSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Valid lat and lng are required' });
+  }
+  const user = (req as AuthenticatedRequest).user;
+  const { lat, lng } = parsed.data;
+  await User.findByIdAndUpdate(user._id, {
+    location: { type: 'Point', coordinates: [lng, lat] }, // GeoJSON is [lng, lat]
+  });
+  return res.json({ success: true });
+});
+
+// ─── User / Donor Routes ──────────────────────────────────────────────────────
+
+// Get all donors — now requires auth (issue #3)
+router.get('/donors', authMiddleware, generalLimiter, async (req: Request, res: Response) => {
   try {
+    const { limit, skip } = parsePagination(req);
     const donors = await User.find({ role: 'donor' })
       .select('name role bloodGroup location avail lastDonated donationsCount score initials')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
       .exec();
     res.json(donors);
-  } catch (error) {
+  } catch {
     res.status(500).json({ error: 'Failed to fetch donors' });
   }
 });
 
-// Get ALL users (for admin)
+// Get ALL users (admin only)
 router.get('/users', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
   try {
-    const users = await User.find().select('-password').exec();
+    const { limit, skip } = parsePagination(req);
+    const users = await User.find().select('-password').sort({ createdAt: -1 }).skip(skip).limit(limit).exec();
     res.json(users);
-  } catch (error) {
+  } catch {
     res.status(500).json({ error: 'Failed to fetch users' });
   }
 });
 
-// Update a user
+// Update a user (admin only)
 router.put('/users/:id', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
   const id = String(req.params.id || '');
   if (!mongoose.Types.ObjectId.isValid(id)) {
     return res.status(400).json({ error: 'Invalid user id' });
   }
-
   const allowedKeys = new Set(['name', 'email', 'role', 'bloodGroup', 'location', 'avail', 'lastDonated', 'donationsCount', 'score', 'initials']);
   const updates = Object.fromEntries(
-    Object.entries(req.body || {}).filter(([key]) => allowedKeys.has(key))
+    Object.entries(req.body || {}).filter(([key]) => allowedKeys.has(key)),
   );
-
   if (Object.keys(updates).length === 0) {
     return res.status(400).json({ error: 'No allowed fields provided for update' });
   }
@@ -247,12 +438,12 @@ router.put('/users/:id', authMiddleware, requireRole('admin'), async (req: Reque
     const updated = await User.findByIdAndUpdate(id, updates, { new: true, runValidators: true }).select('-password').exec();
     if (!updated) return res.status(404).json({ error: 'User not found' });
     res.json(updated);
-  } catch (error) {
+  } catch {
     res.status(500).json({ error: 'Failed to update user' });
   }
 });
 
-// Delete a user
+// Delete a user (admin only)
 router.delete('/users/:id', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
   const id = String(req.params.id || '');
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -262,8 +453,23 @@ router.delete('/users/:id', authMiddleware, requireRole('admin'), async (req: Re
     const deleted = await User.findByIdAndDelete(id).exec();
     if (!deleted) return res.status(404).json({ error: 'User not found' });
     res.json({ success: true, message: 'User deleted' });
-  } catch (error) {
+  } catch {
     res.status(500).json({ error: 'Failed to delete user' });
+  }
+});
+
+// Admin: get real user stats
+router.get('/admin/stats', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
+  try {
+    const [totalUsers, totalDonors, totalPatients] = await Promise.all([
+      User.countDocuments(),
+      User.countDocuments({ role: 'donor' }),
+      User.countDocuments({ role: 'patient' }),
+    ]);
+    const activeSOS = await SOSAlert.countDocuments({ status: 'active' });
+    res.json({ totalUsers, totalDonors, totalPatients, activeSOS });
+  } catch {
+    res.status(500).json({ error: 'Failed to fetch admin stats' });
   }
 });
 
@@ -271,9 +477,9 @@ import DonorProfileModel from '../models/DonorProfile';
 import Donation from '../models/Donation';
 import Achievement from '../models/Achievement';
 
-// Seed mock data
+// Seed mock data (dev only)
 router.post('/seed', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
-  if (process.env.NODE_ENV === 'production') {
+  if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SEED_DATA !== 'true') {
     return res.status(404).json({ error: 'Not found' });
   }
   try {
@@ -281,66 +487,70 @@ router.post('/seed', authMiddleware, requireRole('admin'), async (req: Request, 
     await DonorProfileModel.deleteMany({});
     await Donation.deleteMany({});
     await Achievement.deleteMany({});
-
     await User.syncIndexes();
 
-    const donorsStr = [
-      { name: 'Arjun Sharma', email: 'arjun@example.com', role: 'donor', bloodGroup: 'B+', location: { type: 'Point', coordinates: [77.1025, 28.7041] }, avail: 'Available', password: 'mockpasswordhashed' },
-      { name: 'Priya Kapoor', email: 'priya@example.com', role: 'donor', bloodGroup: 'B+', location: { type: 'Point', coordinates: [77.1502 - 0.02, 28.9889 + 0.01] }, avail: 'Available', password: 'mockpasswordhashed' },
-      { name: 'Vikram Mehta', email: 'vikram@example.com', role: 'donor', bloodGroup: 'O+', location: { type: 'Point', coordinates: [77.1502 + 0.03, 28.9889 + 0.02] }, avail: 'Maybe', password: 'mockpasswordhashed' }
+    const donorsData = [
+      { name: 'Arjun Sharma', email: 'arjun@example.com', role: 'donor', bloodGroup: 'B+', location: { type: 'Point', coordinates: [77.1025, 28.7041] }, avail: 'Available', password: await bcrypt.hash('password123', 12) },
+      { name: 'Priya Kapoor', email: 'priya@example.com', role: 'donor', bloodGroup: 'B+', location: { type: 'Point', coordinates: [77.1302, 28.9989] }, avail: 'Available', password: await bcrypt.hash('password123', 12) },
+      { name: 'Vikram Mehta', email: 'vikram@example.com', role: 'donor', bloodGroup: 'O+', location: { type: 'Point', coordinates: [77.1802, 28.9989] }, avail: 'Maybe', password: await bcrypt.hash('password123', 12) },
+      { name: 'Neha Verma', email: 'neha@example.com', role: 'donor', bloodGroup: 'AB+', location: { type: 'Point', coordinates: [77.209, 28.6139] }, avail: 'Available', password: await bcrypt.hash('password123', 12) },
     ];
 
-    const insertedUsers = await User.insertMany(donorsStr);
+    const insertedUsers = await User.insertMany(donorsData);
 
     for (let i = 0; i < insertedUsers.length; i++) {
       const u = insertedUsers[i];
-      const multiplier = 3 - i; // just cascading sample vars
-
-      await DonorProfileModel.create({
-        userId: u._id,
-        totalDonations: 7 * multiplier,
-        lastDonationDate: new Date('2025-02-01'),
-        responseStats: { totalSOS: 10 * multiplier, acceptedSOS: 9 * multiplier },
-        impactPoints: 1260 * multiplier
-      });
-
+      const m = 3 - i;
+      await DonorProfileModel.create({ userId: u._id, totalDonations: 7 * m, lastDonationDate: new Date('2025-02-01'), responseStats: { totalSOS: 10 * m, acceptedSOS: 9 * m }, impactPoints: 1260 * m });
       await Donation.insertMany([
         { donorId: u._id, date: new Date('2025-02-28'), location: 'AIIMS Delhi', type: 'Whole blood', recipientType: 'Thalassemia patient', status: 'Completed', verified: true, unitsDonated: 1 },
         { donorId: u._id, date: new Date('2024-11-15'), location: 'Safdarjung', type: 'Whole blood', recipientType: 'Emergency SOS', status: 'Completed', verified: true, unitsDonated: 2 },
-        { donorId: u._id, date: new Date('2025-05-25'), location: 'Pending match location', type: 'Platelets', recipientType: 'Pending match', status: 'Scheduled', verified: false, unitsDonated: 1 }
       ]);
-
-      await Achievement.create({
-        donorId: u._id,
-        badges: ['First Drop', 'SOS Hero', '5 Lives Saved'],
-        milestones: { bronze: true, silver: false, gold: false }
-      });
+      await Achievement.create({ donorId: u._id, badges: ['First Drop', 'SOS Hero', '5 Lives Saved'], milestones: { bronze: true, silver: false, gold: false } });
     }
 
-    res.json({ message: 'Real-World Mock Data explicitly seeded bridging all schemas!' });
+    res.json({ message: 'Seed data inserted successfully' });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Failed to cross-seed architecture schemas' });
+    res.status(500).json({ error: 'Failed to seed data' });
   }
 });
 
-// Create SOS Alert
-router.post('/sos', authMiddleware, requireRole('patient'), async (req: Request, res: Response) => {
+// ─── SOS Routes ───────────────────────────────────────────────────────────────
+
+// Create SOS Alert (issue #19 — rate limit now checks resolved status too)
+router.post('/sos', authMiddleware, requireRole('patient'), sosLimiter, async (req: Request, res: Response) => {
   const patient = (req as any).user;
   const io = (req as any).io;
 
   try {
-    const lastSOS = await SOSAlert.findOne({ patientId: patient._id }).sort({ createdAt: -1 });
+    // Only block if there's an ACTIVE (unresolved) recent SOS
+    const lastSOS = await SOSAlert.findOne({
+      patientId: patient._id,
+      status: { $in: ['active', 'dispatched'] },
+      createdAt: { $gte: new Date(Date.now() - 5 * 60 * 1000) },
+    }).sort({ createdAt: -1 });
 
-    if (lastSOS && Date.now() - lastSOS.createdAt.getTime() < 5 * 60 * 1000) {
-      return res.status(400).json({ error: 'Wait before sending another SOS' });
+    if (lastSOS) {
+      return res.status(400).json({ error: 'You already have an active SOS. Wait for it to resolve before sending another.' });
     }
 
     const patientCoords = patient.location?.coordinates;
     if (!patientCoords || patientCoords.length < 2) {
-      return res.status(400).json({ error: 'Patient location is required for SOS matching' });
+      return res.status(400).json({ error: 'We could not detect your location. Please allow location access in your browser, reopen the dashboard, then try again.' });
     }
     const [patientLng, patientLat] = patientCoords;
+
+    const requestedBlood = req.body?.bloodGroup;
+    const bloodNeeded: BloodGroup | null = isBloodGroup(requestedBlood)
+      ? requestedBlood
+      : isBloodGroup(patient.bloodGroup)
+        ? patient.bloodGroup
+        : null;
+
+    if (!bloodNeeded) {
+      return res.status(400).json({ error: 'Blood group is required. Select one in the SOS form or update your profile.' });
+    }
 
     const donors = await User.find({
       role: 'donor',
@@ -351,31 +561,34 @@ router.post('/sos', authMiddleware, requireRole('patient'), async (req: Request,
           $maxDistance: 15000,
         },
       },
-    })
-      .limit(25)
-      .exec();
+    }).limit(25).exec();
 
     const compatibleDonorsObjs = donors
       .filter((donor) => {
-        if (!isBloodGroup(patient.bloodGroup) || !isBloodGroup(donor.bloodGroup)) return false;
-        return isCompatible(donor.bloodGroup, patient.bloodGroup);
+        if (!isBloodGroup(donor.bloodGroup)) return false;
+        return isCompatible(donor.bloodGroup, bloodNeeded);
       })
-      .map(d => ({ donor: d, score: calculateScore(d, patient) }))
+      .map((d) => ({ donor: d, score: calculateScore(d, patient) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, 5);
-      
-    const compatibleDonors = compatibleDonorsObjs.map(d => d.donor);
+
+    const compatibleDonors = compatibleDonorsObjs.map((d) => d.donor);
 
     if (compatibleDonors.length === 0) {
-      return res.status(404).json({ error: 'No compatible donors found nearby' });
+      return res.status(404).json({
+        error: `No compatible donors found nearby for ${bloodNeeded}. Register donors with matching blood types or try again later.`,
+      });
     }
 
     const alert = await SOSAlert.create({
       patientId: patient._id,
-      bloodGroup: patient.bloodGroup || 'B+',
-      location: patient.location || { type: 'Point', coordinates: [77.2090, 28.6139] },
-      hospital: req.body.hospital || 'AIIMS Delhi',
+      bloodGroup: bloodNeeded,
+      // patient.location is guaranteed present here (validated above) — no fake fallback.
+      location: patient.location,
+      hospital: (typeof req.body.hospital === 'string' && req.body.hospital.trim()) || 'Not specified',
       requestType: 'sos',
+      // The background sweeper escalates to the hospital if still unaccepted after 30s.
+      escalateAt: new Date(Date.now() + 30 * 1000),
       deliveryLogs: [],
     });
 
@@ -388,27 +601,16 @@ router.post('/sos', authMiddleware, requireRole('patient'), async (req: Request,
         patientName: patient.name || 'Patient',
         requestType: 'sos',
       });
-      
       if (donor.phone) {
-        const msg = `🚨 URGENT: Blood needed (${alert.bloodGroup}) near you. Please respond ASAP in ThalAI Connect app.`;
+        const msg = `🚨 URGENT: Blood needed (${alert.bloodGroup}) near you. Please respond in ThalAI Connect app.`;
         sendSMS(donor.phone, msg);
         sendWhatsApp(donor.phone, msg);
       }
     });
 
-    // Auto-retry / Escalation logic (30 seconds)
-    setTimeout(async () => {
-      try {
-         const currentSos = await SOSAlert.findById(alert._id);
-         if (currentSos && currentSos.status === 'active') {
-           // Notify hospital explicitly via Whatsapp
-           const hospitalPhone = process.env.HOSPITAL_PHONE || "+10000000000";
-           await sendWhatsApp(hospitalPhone, `Emergency blood (${currentSos.bloodGroup}) required at ${currentSos.hospital}. Escalate internally.`);
-         }
-      } catch(err) {
-         console.error("Auto-retry error:", err);
-      }
-    }, 30000);
+    // Auto-escalation is handled by the persistent SOS sweeper (services/sosSweeper.ts),
+    // driven by alert.escalateAt — so it survives server restarts, unlike the old
+    // in-memory setTimeout that silently dropped escalations on redeploy.
 
     const socketLogs = compatibleDonors.map((donor) => ({
       channel: 'socket' as const,
@@ -420,19 +622,17 @@ router.post('/sos', authMiddleware, requireRole('patient'), async (req: Request,
     }));
     alert.deliveryLogs.push(...socketLogs);
 
-    const emailPromises = compatibleDonors.map((donor) => {
-      const recipientEmail = typeof donor.email === 'string' ? donor.email : '';
-      const donorName = donor.name || 'Donor';
+    const emailResults = await Promise.all(
+      compatibleDonors.map((donor) =>
+        sendEmail({
+          to: typeof donor.email === 'string' ? donor.email : '',
+          subject: `SOS Alert: ${alert.bloodGroup} needed at ${alert.hospital}`,
+          text: `Emergency SOS\n\nPatient: ${patient.name || 'Patient'}\nBlood Group: ${alert.bloodGroup}\nHospital: ${alert.hospital}\nPlease open ThalAI Connect and respond immediately.`,
+          html: `<p><strong>Emergency SOS</strong></p><p>Hi ${escapeHtml(donor.name)},</p><p>A patient needs <strong>${escapeHtml(alert.bloodGroup)}</strong> blood at <strong>${escapeHtml(alert.hospital)}</strong>.</p>`,
+        }),
+      ),
+    );
 
-      return sendEmail({
-        to: recipientEmail,
-        subject: `SOS Alert: ${alert.bloodGroup} needed at ${alert.hospital}`,
-        text: `Emergency SOS request\n\nPatient: ${patient.name || 'Patient'}\nBlood Group Required: ${alert.bloodGroup}\nHospital: ${alert.hospital}\nPlease open ThalAI Connect and respond immediately.`,
-        html: `<p><strong>Emergency SOS request</strong></p><p>Hi ${donorName},</p><p>A patient needs <strong>${alert.bloodGroup}</strong> blood at <strong>${alert.hospital}</strong>.</p><p>Please open ThalAI Connect and respond immediately.</p>`,
-      });
-    });
-
-    const emailResults = await Promise.all(emailPromises);
     emailResults.forEach((result, index) => {
       const donor = compatibleDonors[index];
       alert.deliveryLogs.push({
@@ -447,9 +647,8 @@ router.post('/sos', authMiddleware, requireRole('patient'), async (req: Request,
     });
     await alert.save();
 
-    const emailsSent = emailResults.filter((entry) => entry.ok).length;
-    const emailsSkipped = emailResults.filter((entry) => entry.skipped).length;
-    const emailsFailed = emailResults.length - emailsSent - emailsSkipped;
+    const emailsSent = emailResults.filter((e) => e.ok).length;
+    const emailsSkipped = emailResults.filter((e) => e.skipped).length;
 
     res.status(201).json({
       success: true,
@@ -460,7 +659,7 @@ router.post('/sos', authMiddleware, requireRole('patient'), async (req: Request,
         attempted: emailResults.length,
         sent: emailsSent,
         skipped: emailsSkipped,
-        failed: emailsFailed,
+        failed: emailResults.length - emailsSent - emailsSkipped,
       },
     });
   } catch (error) {
@@ -469,23 +668,16 @@ router.post('/sos', authMiddleware, requireRole('patient'), async (req: Request,
   }
 });
 
-// Atomic Response to SOS
+// Respond to SOS
 router.post('/sos/respond', authMiddleware, requireRole('donor'), async (req: Request, res: Response) => {
-  const { sosId, response } = req.body;
+  const parsed = SosRespondSchema.safeParse(req.body);
+  if (!parsed.success) {
+    const issues = parsed.error.issues ?? (parsed.error as any).errors ?? [];
+    return res.status(400).json({ error: issues[0]?.message ?? 'Invalid input' });
+  }
+  const { sosId, response } = parsed.data;
   const donor = (req as any).user;
   const io = (req as any).io;
-
-  if (!sosId || !['accepted', 'rejected'].includes(response)) {
-    return res.status(400).json({ error: 'sosId and valid response are required' });
-  }
-
-  if (!mongoose.Types.ObjectId.isValid(String(sosId))) {
-    return res.status(400).json({ error: 'Invalid sosId format' });
-  }
-
-  if (!donor || !donor._id) {
-    return res.status(401).json({ error: 'Unauthorized donor context' });
-  }
 
   try {
     const sos = await SOSAlert.findOneAndUpdate(
@@ -497,19 +689,10 @@ router.post('/sos/respond', authMiddleware, requireRole('donor'), async (req: Re
         $or: [{ targetedDonor: null }, { targetedDonor: donor._id }],
       },
       {
-        $push: {
-          responders: {
-            donorId: donor._id,
-            response,
-            respondedAt: new Date(),
-          },
-        },
-        ...(response === 'accepted' && {
-          acceptedDonor: donor._id,
-          status: 'resolved',
-        }),
+        $push: { responders: { donorId: donor._id, response, respondedAt: new Date() } },
+        ...(response === 'accepted' && { acceptedDonor: donor._id, status: 'resolved' }),
       },
-      { new: true }
+      { returnDocument: 'after' },
     );
 
     if (!sos) {
@@ -517,104 +700,72 @@ router.post('/sos/respond', authMiddleware, requireRole('donor'), async (req: Re
     }
 
     if (response === 'accepted') {
+      // The donor is now committed to this donation — take them out of the
+      // available-donors pool so they aren't shown/requested again until free.
+      await User.findByIdAndUpdate(donor._id, { avail: 'Maybe' });
+
       if (sos.patientId) {
-        io?.to(sos.patientId.toString()).emit('sos-accepted', {
-          donorId: donor._id,
-          donorName: donor.name
-        });
+        io?.to(sos.patientId.toString()).emit('sos-accepted', { donorId: donor._id, donorName: donor.name });
       }
 
-      if (!Array.isArray(sos.deliveryLogs)) {
-        sos.deliveryLogs = [];
-      }
-
-      sos.deliveryLogs.push({
-        channel: 'socket',
-        recipientUserId: sos.patientId || undefined,
-        event: 'sos-accepted',
-        status: 'sent',
-        createdAt: new Date(),
-      });
+      if (!Array.isArray(sos.deliveryLogs)) sos.deliveryLogs = [];
+      sos.deliveryLogs.push({ channel: 'socket', recipientUserId: sos.patientId || undefined, event: 'sos-accepted', status: 'sent', createdAt: new Date() });
 
       const patientUser = await User.findById(sos.patientId).exec();
       const patientEmail = typeof patientUser?.email === 'string' ? patientUser.email : '';
       const donorEmail = typeof donor.email === 'string' ? donor.email : '';
 
       const [patientEmailResult, donorEmailResult] = await Promise.all([
-        sendEmail({
-          to: patientEmail,
-          subject: 'SOS Update: A donor accepted your emergency request',
-          text: `Good news ${patientUser?.name || ''}!\n\nDonor ${donor.name} has accepted your SOS request for ${sos.bloodGroup}.\nHospital: ${sos.hospital}\nPlease coordinate in ThalAI Connect.`,
-          html: `<p>Good news ${patientUser?.name || ''}!</p><p><strong>${donor.name}</strong> accepted your SOS request for <strong>${sos.bloodGroup}</strong>.</p><p>Hospital: <strong>${sos.hospital}</strong></p>`,
-        }),
-        sendEmail({
-          to: donorEmail,
-          subject: 'SOS Accepted Confirmation',
-          text: `Thank you ${donor.name}.\n\nYou accepted an SOS request for ${sos.bloodGroup} at ${sos.hospital}.\nPlease proceed as soon as possible.`,
-          html: `<p>Thank you ${donor.name}.</p><p>You accepted an SOS request for <strong>${sos.bloodGroup}</strong> at <strong>${sos.hospital}</strong>.</p><p>Please proceed as soon as possible.</p>`,
-        }),
+        sendEmail({ to: patientEmail, subject: 'SOS Update: A donor accepted your request', text: `${donor.name} accepted your SOS for ${sos.bloodGroup} at ${sos.hospital}.`, html: `<p><strong>${escapeHtml(donor.name)}</strong> accepted your SOS for <strong>${escapeHtml(sos.bloodGroup)}</strong> at <strong>${escapeHtml(sos.hospital)}</strong>.</p>` }),
+        sendEmail({ to: donorEmail, subject: 'SOS Accepted Confirmation', text: `Thank you ${donor.name}. You accepted an SOS for ${sos.bloodGroup} at ${sos.hospital}.`, html: `<p>Thank you ${escapeHtml(donor.name)}. You accepted an SOS for <strong>${escapeHtml(sos.bloodGroup)}</strong> at <strong>${escapeHtml(sos.hospital)}</strong>.</p>` }),
       ]);
 
       sos.deliveryLogs.push(
-        {
-          channel: 'email',
-          recipientUserId: patientUser?._id,
-          recipientEmail: patientEmail,
-          event: 'sos-accepted',
-          status: patientEmailResult.ok ? 'sent' : patientEmailResult.skipped ? 'skipped' : 'failed',
-          reason: patientEmailResult.reason,
-          createdAt: new Date(),
-        },
-        {
-          channel: 'email',
-          recipientUserId: donor._id,
-          recipientEmail: donorEmail,
-          event: 'sos-accepted-confirmation',
-          status: donorEmailResult.ok ? 'sent' : donorEmailResult.skipped ? 'skipped' : 'failed',
-          reason: donorEmailResult.reason,
-          createdAt: new Date(),
-        }
+        { channel: 'email', recipientUserId: patientUser?._id, recipientEmail: patientEmail, event: 'sos-accepted', status: patientEmailResult.ok ? 'sent' : patientEmailResult.skipped ? 'skipped' : 'failed', reason: patientEmailResult.reason, createdAt: new Date() },
+        { channel: 'email', recipientUserId: donor._id, recipientEmail: donorEmail, event: 'sos-accepted-confirmation', status: donorEmailResult.ok ? 'sent' : donorEmailResult.skipped ? 'skipped' : 'failed', reason: donorEmailResult.reason, createdAt: new Date() },
       );
       await sos.save();
 
-      return res.json({
-        message: 'Response recorded successfully',
-        emailDelivery: {
-          configured: isEmailServiceConfigured(),
-          patientNotified: patientEmailResult.ok,
-          donorNotified: donorEmailResult.ok,
-          patientReason: patientEmailResult.reason || null,
-          donorReason: donorEmailResult.reason || null,
-        },
-      });
+      return res.json({ message: 'Response recorded successfully', emailDelivery: { configured: isEmailServiceConfigured(), patientNotified: patientEmailResult.ok, donorNotified: donorEmailResult.ok } });
     }
 
     if (sos.targetedDonor && sos.targetedDonor.toString() === donor._id.toString()) {
       sos.status = 'expired';
     }
     await sos.save();
-
-    res.json({
-      message: response === 'rejected' ? 'SOS request declined' : 'Response recorded successfully',
-    });
+    res.json({ message: 'SOS request declined' });
   } catch (error) {
     console.error('SOS respond error:', error);
     res.status(500).json({ error: 'Failed to process response' });
   }
 });
 
-router.get('/donors/:id/profile', async (req: Request, res: Response) => {
+// Get all SOS alerts — role-restricted (issue #6)
+router.get('/sos', authMiddleware, requireRole('admin', 'patient'), async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    const { limit, skip } = parsePagination(req);
+    const query = user.role === 'patient' ? { patientId: user._id } : {};
+    const alerts = await SOSAlert.find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate('patientId', 'name bloodGroup')
+      .exec();
+    res.json(alerts);
+  } catch {
+    res.status(500).json({ error: 'Failed to fetch SOS alerts' });
+  }
+});
+
+// ─── Donor Profile ────────────────────────────────────────────────────────────
+router.get('/donors/:id/profile', authMiddleware, async (req: Request, res: Response) => {
   try {
     const donor = await User.findOne({ _id: req.params.id, role: 'donor' })
       .select('name bloodGroup avail location lastDonated donationsCount score initials email')
-      .lean()
-      .exec();
-
-    if (!donor) {
-      return res.status(404).json({ error: 'Donor not found' });
-    }
-
-    const profile = {
+      .lean().exec();
+    if (!donor) return res.status(404).json({ error: 'Donor not found' });
+    return res.json({
       _id: String(donor._id),
       name: donor.name,
       bloodGroup: donor.bloodGroup || 'Unknown',
@@ -625,320 +776,69 @@ router.get('/donors/:id/profile', async (req: Request, res: Response) => {
       initials: donor.initials || donor.name.slice(0, 2).toUpperCase(),
       location: donor.location,
       contactMasked: donor.email ? `${String(donor.email).slice(0, 3)}***` : null,
-    };
-
-    return res.json(profile);
-  } catch (error) {
+    });
+  } catch {
     return res.status(500).json({ error: 'Failed to fetch donor profile' });
   }
 });
 
-router.post('/patient/donation-request', authMiddleware, async (req: Request, res: Response) => {
-  const patient = (req as any).user;
-  const io = (req as any).io;
-
-  if (patient.role !== 'patient') {
-    return res.status(403).json({ error: 'Only patients can request donations' });
-  }
-
-  const { donorId, hospital, note } = req.body as { donorId?: string; hospital?: string; note?: string };
-  if (!donorId) {
-    return res.status(400).json({ error: 'donorId is required' });
-  }
-
-  try {
-    const donor = await User.findOne({ _id: donorId, role: 'donor' }).exec();
-    if (!donor) {
-      return res.status(404).json({ error: 'Selected donor not found' });
-    }
-
-    const requestAlert = await SOSAlert.create({
-      patientId: patient._id,
-      bloodGroup: patient.bloodGroup || donor.bloodGroup || 'B+',
-      location: patient.location || { type: 'Point', coordinates: [77.2090, 28.6139] },
-      hospital: hospital || 'AIIMS Delhi',
-      requestType: 'direct',
-      targetedDonor: donor._id,
-      deliveryLogs: [],
-    });
-
-    io.to(donor._id.toString()).emit('sos-alert', {
-      sosId: requestAlert._id,
-      bloodGroup: requestAlert.bloodGroup,
-      location: requestAlert.location,
-      hospital: requestAlert.hospital,
-      note: note || null,
-      requestType: 'direct',
-      patientName: patient.name,
-    });
-
-    requestAlert.deliveryLogs.push({
-      channel: 'socket',
-      recipientUserId: donor._id,
-      recipientEmail: typeof donor.email === 'string' ? donor.email : undefined,
-      event: 'direct-request-created',
-      status: 'sent',
-      createdAt: new Date(),
-    });
-
-    const donorEmailResult = await sendEmail({
-      to: typeof donor.email === 'string' ? donor.email : '',
-      subject: `Direct Donation Request: ${requestAlert.bloodGroup} needed`,
-      text: `${patient.name || 'A patient'} requested your donation support.\nHospital: ${requestAlert.hospital}\nBlood Group: ${requestAlert.bloodGroup}\n${note ? `Note: ${note}` : ''}`,
-      html: `<p><strong>${patient.name || 'A patient'}</strong> requested your donation support.</p><p>Hospital: <strong>${requestAlert.hospital}</strong></p><p>Blood Group: <strong>${requestAlert.bloodGroup}</strong></p>${note ? `<p>Note: ${note}</p>` : ''}`,
-    });
-
-    requestAlert.deliveryLogs.push({
-      channel: 'email',
-      recipientUserId: donor._id,
-      recipientEmail: typeof donor.email === 'string' ? donor.email : '',
-      event: 'direct-request-created',
-      status: donorEmailResult.ok ? 'sent' : donorEmailResult.skipped ? 'skipped' : 'failed',
-      reason: donorEmailResult.reason,
-      createdAt: new Date(),
-    });
-
-    await requestAlert.save();
-
-    return res.status(201).json({
-      success: true,
-      message: `Donation request sent to ${donor.name}`,
-      requestId: requestAlert._id,
-      emailDelivery: {
-        configured: isEmailServiceConfigured(),
-        sent: donorEmailResult.ok,
-        reason: donorEmailResult.reason || null,
-      },
-    });
-  } catch (error) {
-    return res.status(500).json({ error: 'Failed to send donation request' });
-  }
-});
-
-router.get('/admin/sos-delivery-logs', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
-  try {
-    const alerts = await SOSAlert.find()
-      .sort({ createdAt: -1 })
-      .limit(100)
-      .populate('patientId', 'name')
-      .populate('acceptedDonor', 'name')
-      .populate('targetedDonor', 'name')
-      .lean()
-      .exec();
-
-    const logs = alerts.flatMap((alert: any) => {
-      const base = {
-        sosId: String(alert._id),
-        requestType: alert.requestType || 'sos',
-        bloodGroup: alert.bloodGroup,
-        hospital: alert.hospital || 'N/A',
-        status: alert.status,
-        patientName: alert.patientId?.name || 'Unknown',
-        targetedDonorName: alert.targetedDonor?.name || null,
-        acceptedDonorName: alert.acceptedDonor?.name || null,
-      };
-
-      const deliveryRows = Array.isArray(alert.deliveryLogs)
-        ? alert.deliveryLogs.map((entry: any) => ({
-          ...base,
-          channel: entry.channel,
-          event: entry.event,
-          recipientEmail: entry.recipientEmail || null,
-          recipientUserId: entry.recipientUserId ? String(entry.recipientUserId) : null,
-          statusDelivery: entry.status,
-          reason: entry.reason || null,
-          createdAt: entry.createdAt || alert.createdAt,
-        }))
-        : [];
-
-      if (deliveryRows.length > 0) return deliveryRows;
-
-      return [{
-        ...base,
-        channel: 'unknown',
-        event: 'legacy-sos-record',
-        recipientEmail: null,
-        recipientUserId: null,
-        statusDelivery: 'sent',
-        reason: null,
-        createdAt: alert.createdAt,
-      }];
-    });
-
-    return res.json({ count: logs.length, logs });
-  } catch (error) {
-    return res.status(500).json({ error: 'Failed to fetch SOS delivery logs' });
-  }
-});
-
-// Get all SOS alerts (Mocked fetch)
-router.get('/sos', authMiddleware, async (req: Request, res: Response) => {
-  try {
-    const alerts = await SOSAlert.find().sort({ createdAt: -1 }).populate('patientId', 'name bloodGroup').exec();
-    res.json(alerts);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch SOS alerts' });
-  }
-});
-
-// Match compatible donors for a patient profile
-router.get('/match', async (req: Request, res: Response) => {
-  const { bloodGroup, lat, lng, requesterRole } = parseQueryOrBody(req);
-
-  if (!isBloodGroup(bloodGroup) || typeof lat !== 'number' || typeof lng !== 'number' || Number.isNaN(lat) || Number.isNaN(lng)) {
-    return res.status(400).json({
-      success: false,
-      error: 'Invalid query. Use GET /api/match?bloodGroup=A%2B&lat=28.6139&lng=77.2090',
-      example: '/api/match?bloodGroup=A%2B&lat=28.6139&lng=77.2090&requesterRole=patient',
-    });
-  }
-
-  if (requesterRole === 'donor') {
-    return res.status(403).json({
-      success: false,
-      error: 'Donor accounts cannot request donor matching.',
-    });
-  }
-
-  const patient: PatientInput = {
-    bloodGroup,
-    location: { lat, lng },
-  };
-
-  if (Number.isNaN(patient.location.lat) || Number.isNaN(patient.location.lng)) {
-    return res.status(400).json({
-      success: false,
-      error: 'lat and lng must be valid numbers.',
-    });
-  }
-
-  try {
-    const dbDonors = await User.find({ role: 'donor' }).lean().exec();
-    const normalizedDonors = dbDonors
-      .map(mapUserToDonorProfile)
-      .filter((donor): donor is DonorProfile => donor !== null);
-
-    const donorPool = normalizedDonors.length > 0 ? normalizedDonors : mockDonors;
-    const matches = matchDonors(patient, donorPool);
-
-    return res.json({
-      success: true,
-      count: matches.length,
-      source: normalizedDonors.length > 0 ? 'database' : 'mock',
-      matches,
-    });
-  } catch (error) {
-    console.error('Match GET error:', error);
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to run matching engine',
-    });
-  }
-});
-
-router.post('/match', async (req: Request, res: Response) => {
-  if (!isPatientInput(req.body)) {
-    return res.status(400).json({
-      success: false,
-      error: 'Invalid payload. Expected { bloodGroup, location: { lat, lng } }',
-    });
-  }
-
-  const requesterRole = (req.body as { requesterRole?: unknown }).requesterRole;
-  if (requesterRole === 'donor') {
-    return res.status(403).json({
-      success: false,
-      error: 'Donor accounts cannot request donor matching.',
-    });
-  }
-
-  try {
-    const dbDonors = await User.find({ role: 'donor' }).lean().exec();
-    const normalizedDonors = dbDonors
-      .map(mapUserToDonorProfile)
-      .filter((donor): donor is DonorProfile => donor !== null);
-
-    const donorPool = normalizedDonors.length > 0 ? normalizedDonors : mockDonors;
-    const matches = matchDonors(req.body, donorPool);
-
-    return res.json({
-      success: true,
-      count: matches.length,
-      source: normalizedDonors.length > 0 ? 'database' : 'mock',
-      matches,
-    });
-  } catch (error) {
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to run matching engine',
-    });
-  }
-});
-
-function calculateApproxDistance(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const R = 6371;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
-  return Number((R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))).toFixed(1));
-}
-
-router.get('/donors/nearby', async (req: Request, res: Response) => {
+// Nearby donors — now requires auth (issue #5)
+router.get('/donors/nearby', authMiddleware, generalLimiter, async (req: Request, res: Response) => {
   const { lat, lng, bloodGroup, maxDistance = 10000 } = req.query;
+  const latNum = Number(lat);
+  const lngNum = Number(lng);
+  const maxDistanceNum = Number(maxDistance);
+  const requestedBloodGroup = typeof bloodGroup === 'string' && bloodGroup !== 'all'
+    ? bloodGroup.toUpperCase()
+    : undefined;
 
-  if (!lat || !lng) {
-    return res.status(400).json({ error: 'lat and lng are required' });
+  if (
+    !Number.isFinite(latNum) ||
+    !Number.isFinite(lngNum) ||
+    latNum < -90 ||
+    latNum > 90 ||
+    lngNum < -180 ||
+    lngNum > 180
+  ) {
+    return res.status(400).json({ error: 'Valid lat and lng are required' });
   }
+
+  if (!Number.isFinite(maxDistanceNum) || maxDistanceNum <= 0 || maxDistanceNum > 100000) {
+    return res.status(400).json({ error: 'maxDistance must be between 1 and 100000 meters' });
+  }
+
+  if (requestedBloodGroup && !isBloodGroup(requestedBloodGroup)) {
+    return res.status(400).json({ error: 'Invalid bloodGroup' });
+  }
+  const compatibleBloodGroup = requestedBloodGroup as BloodGroup | undefined;
 
   try {
     const query: any = {
       role: 'donor',
-      avail: { $ne: 'Offline' },
-      location: {
-        $near: {
-          $geometry: {
-            type: 'Point',
-            coordinates: [Number(lng), Number(lat)]
-          },
-          $maxDistance: Number(maxDistance),
-        },
-      },
+      // Only truly-available donors. A donor who accepted a request is set to
+      // 'Maybe' (committed) and thus drops out of find-donors here.
+      avail: 'Available',
+      location: { $near: { $geometry: { type: 'Point', coordinates: [lngNum, latNum] }, $maxDistance: maxDistanceNum } },
     };
 
-    if (bloodGroup && bloodGroup !== 'all') {
-      query.bloodGroup = bloodGroup;
-    }
-
     const donors = await User.find(query).limit(20).exec();
+    const compatibleDonors = compatibleBloodGroup
+      ? donors.filter((donor) => isBloodGroup(donor.bloodGroup) && isCompatible(donor.bloodGroup, compatibleBloodGroup))
+      : donors;
 
-    const formattedDonors = donors.map((d: any) => {
+    const formattedDonors = compatibleDonors.map((d: any) => {
       const donorLat = d.location?.coordinates?.[1] || 0;
       const donorLng = d.location?.coordinates?.[0] || 0;
-
-      const dist = d.distance || calculateApproxDistance(Number(lat), Number(lng), donorLat, donorLng);
-
-      // Calculate Smart Match Score
-      const isExactMatch = !bloodGroup || bloodGroup === 'all' || d.bloodGroup === bloodGroup;
-      const compScore = isExactMatch ? 1 : 0.8;
-
-      const distFactor = Math.max(0, 1 - (dist / (Number(maxDistance) / 1000))); // normalize distance 0-1
+      const dist = calculateDistance(latNum, lngNum, donorLat, donorLng);
+      const compScore = compatibleBloodGroup ? 1 : 0.8;
+      const distFactor = Math.max(0, 1 - dist / (maxDistanceNum / 1000));
       const donCountFactor = Math.min(1, (d.donationsCount || 0) / 10);
       const availFactor = d.avail === 'Available' ? 1 : 0.5;
-
-      let rawScore = (0.4 * compScore) + (0.3 * distFactor) + (0.2 * donCountFactor) + (0.1 * availFactor);
-      const finalScore = (rawScore * 100).toFixed(1);
-
+      const rawScore = 0.4 * compScore + 0.3 * distFactor + 0.2 * donCountFactor + 0.1 * availFactor;
       return {
-        _id: d._id,
-        name: d.name,
-        bloodGroup: d.bloodGroup,
-        location: d.location,
-        distance: dist.toFixed(1),
-        lastDonated: d.lastDonated,
-        donationCount: d.donationsCount,
-        status: d.avail,
-        initials: d.initials,
-        score: parseFloat(finalScore),
+        _id: d._id, name: d.name, bloodGroup: d.bloodGroup, location: d.location,
+        distance: dist.toFixed(1), lastDonated: d.lastDonated, donationCount: d.donationsCount,
+        status: d.avail, initials: d.initials, score: parseFloat((rawScore * 100).toFixed(1)),
       };
     }).sort((a, b) => b.score - a.score);
 
@@ -949,103 +849,161 @@ router.get('/donors/nearby', async (req: Request, res: Response) => {
   }
 });
 
-let mockTransfusions = [
-  { date: new Date('2025-02-14'), hb: 9.8, units: 2, hospital: 'Safdarjung' },
-  { date: new Date('2025-03-28'), hb: 10.2, units: 2, hospital: 'AIIMS Delhi' }
-];
+// ─── Matching Routes — now requires auth (issue #4) ───────────────────────────
+router.get('/match', authMiddleware, generalLimiter, async (req: Request, res: Response) => {
+  const { bloodGroup, lat, lng, requesterRole } = parseQueryOrBody(req);
+  if (!isBloodGroup(bloodGroup) || typeof lat !== 'number' || typeof lng !== 'number' || Number.isNaN(lat) || Number.isNaN(lng)) {
+    return res.status(400).json({ success: false, error: 'Invalid query. Use GET /api/match?bloodGroup=A%2B&lat=28.6139&lng=77.2090' });
+  }
+  const requester = (req as AuthenticatedRequest).user;
+  if (requester?.role === 'donor' || requesterRole === 'donor') return res.status(403).json({ success: false, error: 'Donor accounts cannot request donor matching.' });
 
-const patientPlannedAppointments = new Map<
-  string,
-  Array<{
-    id: string;
-    date: string;
-    time: string;
-    type: 'transfusion' | 'checkup' | 'consultation';
-    hospital: string;
-    doctor?: string;
-    notes?: string;
-    source: 'planned';
-  }>
->();
+  try {
+    const dbDonors = await User.find({ role: 'donor' }).lean().exec();
+    const normalizedDonors = dbDonors.map(mapUserToDonorProfile).filter((d): d is DonorProfile => d !== null);
+    const donorPool = normalizedDonors.length > 0 ? normalizedDonors : mockDonors;
+    const matches = matchDonors({ bloodGroup, location: { lat, lng } }, donorPool);
+    return res.json({ success: true, count: matches.length, source: normalizedDonors.length > 0 ? 'database' : 'mock', matches });
+  } catch (error) {
+    console.error('Match GET error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to run matching engine' });
+  }
+});
 
-router.get('/patient/timeline', authMiddleware, async (req: Request, res: Response) => {
+router.post('/match', authMiddleware, generalLimiter, async (req: Request, res: Response) => {
+  if (!isPatientInput(req.body)) {
+    return res.status(400).json({ success: false, error: 'Invalid payload. Expected { bloodGroup, location: { lat, lng } }' });
+  }
+  const requesterRole = (req.body as any).requesterRole;
+  const requester = (req as AuthenticatedRequest).user;
+  if (requester?.role === 'donor' || requesterRole === 'donor') return res.status(403).json({ success: false, error: 'Donor accounts cannot request donor matching.' });
+
+  try {
+    const dbDonors = await User.find({ role: 'donor' }).lean().exec();
+    const normalizedDonors = dbDonors.map(mapUserToDonorProfile).filter((d): d is DonorProfile => d !== null);
+    const donorPool = normalizedDonors.length > 0 ? normalizedDonors : mockDonors;
+    const matches = matchDonors(req.body, donorPool);
+    return res.json({ success: true, count: matches.length, source: normalizedDonors.length > 0 ? 'database' : 'mock', matches });
+  } catch {
+    return res.status(500).json({ success: false, error: 'Failed to run matching engine' });
+  }
+});
+
+// ─── Patient Donation Request ─────────────────────────────────────────────────
+router.post('/patient/donation-request', authMiddleware, requireRole('patient'), async (req: Request, res: Response) => {
+  const patient = (req as any).user;
+  const io = (req as any).io;
+  const parsed = DonationRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    const issues = parsed.error.issues ?? (parsed.error as any).errors ?? [];
+    return res.status(400).json({ error: issues[0]?.message ?? 'Invalid donation request' });
+  }
+  const { donorId, hospital, note } = parsed.data;
+
+  try {
+    const donor = await User.findOne({ _id: donorId, role: 'donor' }).exec();
+    if (!donor) return res.status(404).json({ error: 'Selected donor not found' });
+    if (donor.avail === 'Offline') return res.status(400).json({ error: 'Selected donor is not available' });
+    if (isBloodGroup(patient.bloodGroup) && isBloodGroup(donor.bloodGroup) && !isCompatible(donor.bloodGroup, patient.bloodGroup)) {
+      return res.status(400).json({ error: `${donor.bloodGroup} is not compatible with ${patient.bloodGroup}` });
+    }
+
+    // One request per donor: block a duplicate while an earlier request to this
+    // same donor is still pending, or has already been accepted.
+    const existingRequest = await SOSAlert.findOne({
+      patientId: patient._id,
+      targetedDonor: donor._id,
+      requestType: 'direct',
+      status: { $in: ['active', 'dispatched', 'resolved'] },
+    }).exec();
+    if (existingRequest) {
+      return res.status(409).json({
+        error: existingRequest.status === 'resolved'
+          ? 'This donor has already accepted your request.'
+          : 'You already have a pending request with this donor.',
+      });
+    }
+
+    const requestAlert = await SOSAlert.create({
+      patientId: patient._id,
+      bloodGroup: patient.bloodGroup || donor.bloodGroup || 'B+',
+      location: patient.location || { type: 'Point', coordinates: [77.209, 28.6139] },
+      hospital: hospital || 'AIIMS Delhi',
+      requestType: 'direct',
+      targetedDonor: donor._id,
+      deliveryLogs: [],
+    });
+
+    io.to(donor._id.toString()).emit('sos-alert', { sosId: requestAlert._id, bloodGroup: requestAlert.bloodGroup, location: requestAlert.location, hospital: requestAlert.hospital, note: note || null, requestType: 'direct', patientName: patient.name });
+
+    requestAlert.deliveryLogs.push({ channel: 'socket', recipientUserId: donor._id, recipientEmail: typeof donor.email === 'string' ? donor.email : undefined, event: 'direct-request-created', status: 'sent', createdAt: new Date() });
+
+    const donorEmailResult = await sendEmail({
+      to: typeof donor.email === 'string' ? donor.email : '',
+      subject: `Direct Donation Request: ${requestAlert.bloodGroup} needed`,
+      text: `${patient.name || 'A patient'} requested your donation support.\nHospital: ${requestAlert.hospital}\nBlood Group: ${requestAlert.bloodGroup}${note ? `\nNote: ${note}` : ''}`,
+      html: `<p><strong>${escapeHtml(patient.name || 'A patient')}</strong> requested your donation support.</p><p>Hospital: <strong>${escapeHtml(requestAlert.hospital)}</strong></p><p>Blood Group: <strong>${escapeHtml(requestAlert.bloodGroup)}</strong></p>${note ? `<p>Note: ${escapeHtml(note)}</p>` : ''}`,
+    });
+
+    requestAlert.deliveryLogs.push({ channel: 'email', recipientUserId: donor._id, recipientEmail: typeof donor.email === 'string' ? donor.email : '', event: 'direct-request-created', status: donorEmailResult.ok ? 'sent' : donorEmailResult.skipped ? 'skipped' : 'failed', reason: donorEmailResult.reason, createdAt: new Date() });
+    await requestAlert.save();
+
+    return res.status(201).json({ success: true, message: `Donation request sent to ${donor.name}`, requestId: requestAlert._id, emailDelivery: { configured: isEmailServiceConfigured(), sent: donorEmailResult.ok } });
+  } catch {
+    return res.status(500).json({ error: 'Failed to send donation request' });
+  }
+});
+
+// ─── Patient Timeline ─────────────────────────────────────────────────────────
+router.get('/patient/timeline', authMiddleware, requireRole('patient'), async (req: Request, res: Response) => {
   try {
     const patient = (req as any).user;
-    const fromProfile = Array.isArray(patient?.transfusions) ? patient.transfusions : [];
-    const transfusions = (fromProfile.length > 0 ? fromProfile : mockTransfusions)
-      .map((entry: any) => ({
-        date: new Date(entry.date),
-        hb: Number(entry.hb || 10),
-        units: Number(entry.units || 2),
-        hospital: entry.hospital || 'Unknown Hospital',
-      }))
+    const transfusions = (Array.isArray(patient.transfusions) ? patient.transfusions : [])
+      .map((e: any) => ({ date: new Date(e.date), hb: Number(e.hb || 10), units: Number(e.units || 2), hospital: e.hospital || 'Unknown Hospital' }))
       .sort((a: any, b: any) => a.date.getTime() - b.date.getTime());
 
     if (transfusions.length < 2) {
-      return res.json({
-        lastTransfusion: transfusions[0]?.date || new Date(),
-        avgCycle: 21,
-        nextTransfusion: new Date(new Date().setDate(new Date().getDate() + 21)),
-        status: 'Due Soon',
-        history: transfusions
-      });
+      return res.json({ lastTransfusion: transfusions[0]?.date || new Date(), avgCycle: 21, nextTransfusion: new Date(Date.now() + 21 * 24 * 60 * 60 * 1000), status: 'Due Soon', history: transfusions });
     }
 
     let totalDays = 0;
     for (let i = 1; i < transfusions.length; i++) {
-      const prev = new Date(transfusions[i - 1].date);
-      const curr = new Date(transfusions[i].date);
-      totalDays += (curr.getTime() - prev.getTime()) / (1000 * 60 * 60 * 24);
+      totalDays += (transfusions[i].date.getTime() - transfusions[i - 1].date.getTime()) / (1000 * 60 * 60 * 24);
     }
-
     const avgCycle = Math.max(14, Math.floor(totalDays / (transfusions.length - 1)));
     const last = transfusions[transfusions.length - 1];
-
     const nextDate = new Date(last.date);
     nextDate.setDate(nextDate.getDate() + avgCycle);
 
-    res.json({
-      lastTransfusion: last.date,
-      avgCycle,
-      nextTransfusion: nextDate,
-      status: nextDate < new Date() ? 'Overdue' : 'Due Soon',
-      history: transfusions
-    });
-  } catch (err) {
+    res.json({ lastTransfusion: last.date, avgCycle, nextTransfusion: nextDate, status: nextDate < new Date() ? 'Overdue' : 'Due Soon', history: transfusions });
+  } catch {
     res.status(500).json({ error: 'Timeline failed' });
   }
 });
 
-router.post('/patient/timeline', authMiddleware, async (req: Request, res: Response) => {
+router.post('/patient/timeline', authMiddleware, requireRole('patient'), async (req: Request, res: Response) => {
   try {
-    const patient = (req as any).user;
-    const { hb, units, hospital } = req.body;
-    const newEntry = {
-      date: new Date(),
-      hb: hb || 10.5,
-      units: units || 2,
-      hospital: hospital || 'Local Clinic'
-    };
-
-    if (patient?.role === 'patient') {
-      const transfusions = Array.isArray(patient.transfusions) ? patient.transfusions : [];
-      transfusions.push(newEntry);
-      patient.transfusions = transfusions;
-      await patient.save();
-    } else {
-      mockTransfusions.push(newEntry);
+    const parsed = TimelineEntrySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid transfusion record' });
     }
+    const patient = (req as any).user;
+    const { hb, units, hospital } = parsed.data;
+    const newEntry = { date: new Date(), hb, units, hospital };
 
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to add timeline record' });
+    await User.findByIdAndUpdate(patient._id, { $push: { transfusions: newEntry } });
+    return res.json({ success: true });
+  } catch {
+    return res.status(500).json({ error: 'Failed to add timeline record' });
   }
 });
 
-router.get('/patient/appointments', authMiddleware, async (req: Request, res: Response) => {
+// ─── Patient Appointments (now persisted in MongoDB — issue #10) ──────────────
+router.get('/patient/appointments', authMiddleware, requireRole('patient'), async (req: Request, res: Response) => {
   try {
     const patient = (req as any).user;
-    const transfusions = Array.isArray(patient.transfusions) ? [...patient.transfusions] : [];
+    const freshUser = await User.findById(patient._id).exec();
+    const transfusions = Array.isArray(freshUser?.transfusions) ? [...freshUser!.transfusions] : [];
     transfusions.sort((a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
     const completed = transfusions.map((item: any, index: number) => ({
@@ -1054,21 +1012,18 @@ router.get('/patient/appointments', authMiddleware, async (req: Request, res: Re
       time: '10:00 AM',
       type: 'transfusion' as const,
       hospital: item.hospital || 'Unknown Hospital',
-      doctor: undefined,
       status: 'completed' as const,
       notes: `${item.units || 2} units · Hb ${item.hb ?? 'N/A'} g/dL`,
       source: 'history',
     }));
 
-    const planned = patientPlannedAppointments.get(String(patient._id)) || [];
+    const planned = await Appointment.find({ patientId: patient._id }).lean().exec();
 
     let avgCycle = 21;
     if (transfusions.length >= 2) {
       let totalDays = 0;
       for (let i = 1; i < transfusions.length; i++) {
-        const prev = new Date(transfusions[i - 1].date);
-        const curr = new Date(transfusions[i].date);
-        totalDays += (curr.getTime() - prev.getTime()) / (1000 * 60 * 60 * 24);
+        totalDays += (new Date(transfusions[i].date).getTime() - new Date(transfusions[i - 1].date).getTime()) / (1000 * 60 * 60 * 24);
       }
       avgCycle = Math.max(14, Math.round(totalDays / (transfusions.length - 1)));
     }
@@ -1077,100 +1032,57 @@ router.get('/patient/appointments', authMiddleware, async (req: Request, res: Re
     const predictedNext = new Date(lastDate);
     predictedNext.setDate(predictedNext.getDate() + avgCycle);
 
-    const systemUpcoming = {
-      id: `next-${String(patient._id)}`,
-      date: predictedNext.toISOString().slice(0, 10),
-      time: '09:30 AM',
-      type: 'transfusion' as const,
-      hospital: transfusions[transfusions.length - 1]?.hospital || 'AIIMS Delhi',
-      doctor: 'Assigned by care team',
-      notes: `Predicted based on ${avgCycle}-day cycle`,
-      source: 'predicted',
-    };
+    const systemUpcoming = { id: `next-${String(patient._id)}`, date: predictedNext.toISOString().slice(0, 10), time: '09:30 AM', type: 'transfusion' as const, hospital: transfusions[transfusions.length - 1]?.hospital || 'AIIMS Delhi', doctor: 'Assigned by care team', notes: `Predicted based on ${avgCycle}-day cycle`, source: 'predicted' };
 
-    const merged = [...completed, ...planned, systemUpcoming]
+    const merged = [...completed, ...planned.map((p: any) => ({ id: String(p._id), date: p.date, time: p.time, type: p.type, hospital: p.hospital, doctor: p.doctor, notes: p.notes, source: p.source })), systemUpcoming]
       .map((item) => {
         const dt = new Date(`${item.date}T00:00:00`);
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        return {
-          ...item,
-          status: dt < today ? ('completed' as const) : ('upcoming' as const),
-        };
+        const today = new Date(); today.setHours(0, 0, 0, 0);
+        return { ...item, status: dt < today ? 'completed' as const : 'upcoming' as const };
       })
       .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
-    return res.json({
-      avgCycle,
-      appointments: merged,
-    });
-  } catch (error) {
+    return res.json({ avgCycle, appointments: merged });
+  } catch {
     return res.status(500).json({ error: 'Failed to fetch appointments' });
   }
 });
 
-router.post('/patient/appointments', authMiddleware, async (req: Request, res: Response) => {
+router.post('/patient/appointments', authMiddleware, requireRole('patient'), async (req: Request, res: Response) => {
   try {
+    const parsed = AppointmentInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid appointment' });
+    }
     const patient = (req as any).user;
-    const { date, time, type, hospital, doctor, notes } = req.body as {
-      date?: string;
-      time?: string;
-      type?: 'transfusion' | 'checkup' | 'consultation';
-      hospital?: string;
-      doctor?: string;
-      notes?: string;
-    };
+    const { date, time, type, hospital, doctor, notes } = parsed.data;
 
-    if (!date || !type || !hospital) {
-      return res.status(400).json({ error: 'date, type and hospital are required' });
-    }
-
-    if (type === 'transfusion') {
-      const transfusions = Array.isArray(patient.transfusions) ? patient.transfusions : [];
-      transfusions.push({
-        date: new Date(date),
-        hb: 10.0,
-        units: 2,
-        hospital,
-      });
-      patient.transfusions = transfusions;
-      await patient.save();
-    } else {
-      const patientId = String(patient._id);
-      const existing = patientPlannedAppointments.get(patientId) || [];
-      existing.push({
-        id: `plan-${Date.now()}`,
-        date,
-        time: time || '10:00 AM',
-        type,
-        hospital,
-        doctor,
-        notes,
-        source: 'planned',
-      });
-      patientPlannedAppointments.set(patientId, existing);
-    }
-
+    // All appointment types (including transfusion) are stored as PLANNED
+    // appointments. We no longer fabricate a completed-transfusion record with
+    // hb:10/units:2 — real values are recorded via /patient/timeline once the
+    // transfusion actually happens, keeping the cycle prediction honest.
+    await Appointment.create({
+      patientId: patient._id,
+      date, time: time || '10:00 AM', type, hospital, doctor, notes,
+      source: 'planned',
+    });
     return res.status(201).json({ success: true });
-  } catch (error) {
+  } catch {
     return res.status(500).json({ error: 'Failed to create appointment' });
   }
 });
 
-router.post('/patient/predictions/model', async (req: Request, res: Response) => {
+// ─── ML Prediction Proxy ──────────────────────────────────────────────────────
+router.post('/patient/predictions/model', authMiddleware, requireRole('patient'), async (req: Request, res: Response) => {
   try {
-    const aiBaseUrl = process.env.AI_SERVICE_URL || 'http://localhost:5001';
-    const upstream = await fetch(`${aiBaseUrl}/api/ml/predict`, {
+    const ai = getAiServiceConfig();
+    const upstream = await fetch(`${ai.baseUrl}/api/ml/predict`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': ai.apiKey },
       body: JSON.stringify(req.body || {}),
     });
-
     const data = await upstream.json();
-    if (!upstream.ok) {
-      return res.status(upstream.status).json(data);
-    }
-
+    if (!upstream.ok) return res.status(upstream.status).json(data);
     return res.json(data);
   } catch (err) {
     console.error('ML prediction proxy failed:', err);
@@ -1178,23 +1090,55 @@ router.post('/patient/predictions/model', async (req: Request, res: Response) =>
   }
 });
 
-router.post('/patient/predictions/build-dataset', async (_req: Request, res: Response) => {
+router.post('/patient/predictions/build-dataset', authMiddleware, requireRole('admin'), async (_req: Request, res: Response) => {
   try {
-    const aiBaseUrl = process.env.AI_SERVICE_URL || 'http://localhost:5001';
-    const upstream = await fetch(`${aiBaseUrl}/api/ml/build-dataset`, {
+    const ai = getAiServiceConfig();
+    const upstream = await fetch(`${ai.baseUrl}/api/ml/build-dataset`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': ai.apiKey },
     });
-
     const data = await upstream.json();
-    if (!upstream.ok) {
-      return res.status(upstream.status).json(data);
-    }
-
+    if (!upstream.ok) return res.status(upstream.status).json(data);
     return res.json(data);
   } catch (err) {
     console.error('Dataset build proxy failed:', err);
     return res.status(500).json({ error: 'Failed to build dataset via ML service' });
+  }
+});
+
+// ─── AI Chat Proxy (issue #18 — frontend now calls /api/ai/chat, not localhost) ─
+router.post('/ai/chat', authMiddleware, generalLimiter, async (req: Request, res: Response) => {
+  try {
+    const { message } = req.body;
+    if (!message || typeof message !== 'string') {
+      return res.status(400).json({ error: 'message is required' });
+    }
+    const ai = getAiServiceConfig();
+    const upstream = await fetch(`${ai.baseUrl}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': ai.apiKey },
+      body: JSON.stringify({ message }),
+    });
+    const data = await upstream.json();
+    return res.status(upstream.ok ? 200 : upstream.status).json(data);
+  } catch (err) {
+    console.error('AI chat proxy failed:', err);
+    return res.status(500).json({ error: 'AI service unavailable' });
+  }
+});
+
+// ─── Admin SOS Delivery Logs ──────────────────────────────────────────────────
+router.get('/admin/sos-delivery-logs', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
+  try {
+    const alerts = await SOSAlert.find().sort({ createdAt: -1 }).limit(100).populate('patientId', 'name').populate('acceptedDonor', 'name').populate('targetedDonor', 'name').lean().exec();
+    const logs = (alerts as any[]).flatMap((alert) => {
+      const base = { sosId: String(alert._id), requestType: alert.requestType || 'sos', bloodGroup: alert.bloodGroup, hospital: alert.hospital || 'N/A', status: alert.status, patientName: alert.patientId?.name || 'Unknown', targetedDonorName: alert.targetedDonor?.name || null, acceptedDonorName: alert.acceptedDonor?.name || null };
+      const rows = Array.isArray(alert.deliveryLogs) ? alert.deliveryLogs.map((entry: any) => ({ ...base, channel: entry.channel, event: entry.event, recipientEmail: entry.recipientEmail || null, recipientUserId: entry.recipientUserId ? String(entry.recipientUserId) : null, statusDelivery: entry.status, reason: entry.reason || null, createdAt: entry.createdAt || alert.createdAt })) : [];
+      return rows.length > 0 ? rows : [{ ...base, channel: 'unknown', event: 'legacy-sos-record', recipientEmail: null, recipientUserId: null, statusDelivery: 'sent', reason: null, createdAt: alert.createdAt }];
+    });
+    return res.json({ count: logs.length, logs });
+  } catch {
+    return res.status(500).json({ error: 'Failed to fetch SOS delivery logs' });
   }
 });
 

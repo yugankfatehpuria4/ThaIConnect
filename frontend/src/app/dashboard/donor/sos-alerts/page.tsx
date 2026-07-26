@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { AlertCircle, CheckCircle2, Clock, MapPin, Navigation, Phone, X, Bell } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Clock, MapPin, Bell } from 'lucide-react';
 import { useSocket } from '@/context/SocketContext';
 
 type SOSAlert = {
@@ -32,15 +32,9 @@ function timeAgo(dateStr: string) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-const defaultAlerts: SOSAlert[] = [
-  { _id: 'demo1', bloodGroup: 'B+', hospital: 'AIIMS Delhi', status: 'active', createdAt: new Date().toISOString(), patientId: { name: 'Rohan M.', bloodGroup: 'B+' } },
-  { _id: 'demo2', bloodGroup: 'O-', hospital: 'Safdarjung Hospital', status: 'active', createdAt: new Date(Date.now() - 1800000).toISOString(), patientId: { name: 'Anita V.', bloodGroup: 'O-' } },
-  { _id: 'demo3', bloodGroup: 'A+', hospital: 'Apollo Delhi', status: 'resolved', createdAt: new Date(Date.now() - 86400000).toISOString(), patientId: { name: 'Priya L.', bloodGroup: 'A+' } },
-];
-
 export default function SOSAlertsPage() {
   const { socket } = useSocket();
-  const [alerts, setAlerts] = useState<SOSAlert[]>(defaultAlerts);
+  const [alerts, setAlerts] = useState<SOSAlert[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
 
@@ -49,8 +43,7 @@ export default function SOSAlertsPage() {
     fetch('/api/donor/sos-alerts', { headers })
       .then(res => res.json())
       .then(data => {
-        if (Array.isArray(data) && data.length > 0) setAlerts(data);
-        // if empty, keep defaultAlerts
+        if (Array.isArray(data)) setAlerts(data);
       })
       .catch(console.error)
       .finally(() => setLoading(false));
@@ -240,7 +233,7 @@ export default function SOSAlertsPage() {
             <div className="card text-center py-12">
               <div className="text-4xl mb-3">✅</div>
               <p className="text-gray-500 font-medium">No SOS alerts at the moment.</p>
-              <p className="text-gray-400 text-sm mt-1">We'll notify you when a patient near you needs help.</p>
+              <p className="text-gray-400 text-sm mt-1">We&apos;ll notify you when a patient near you needs help.</p>
             </div>
           )}
         </>
@@ -248,4 +241,3 @@ export default function SOSAlertsPage() {
     </div>
   );
 }
-

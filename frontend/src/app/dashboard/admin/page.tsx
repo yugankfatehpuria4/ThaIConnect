@@ -1,22 +1,29 @@
 'use client';
-import { useState, useEffect, type Dispatch, type ReactNode, type SetStateAction } from 'react';
+import { useCallback, useEffect, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { Users, ShieldCheck, Clock, Activity, Wand2 } from 'lucide-react';
+import { renderFormattedText } from '@/utils/renderFormattedText';
 
-const posts = {
-  instagram: '🩸 **Did you know?** Thalassemia affects 100,000+ children born in India every year. Regular blood transfusions are life-saving. Join ThalAI Connect and donate today — your one donation can sustain a child for 3 weeks. 💪 #ThalassemiaAwareness #BloodDonation #ThalAIConnect',
-  twitter: 'Every 30 min, a child with thalassemia needs a transfusion in India. Be the hero — register as a donor on ThalAI Connect. Your B+ or O+ blood could be the difference between life and death. 🩸 #DonateBlood #Thalassemia',
-  whatsapp: '🙏 Dear friend,\n\nA thalassemia patient near you needs B+ blood urgently.\n\nDonating takes only 30 minutes and can save a life. If you are eligible, please register on ThalAI Connect.\n\nThank you for caring. ❤️'
+type PlatformType = 'instagram' | 'twitter' | 'whatsapp';
+
+type AdminStats = {
+  totalUsers: number;
+  totalDonors: number;
+  totalPatients: number;
+  activeSOS: number;
 };
-
-type PlatformType = keyof typeof posts;
 
 export default function AdminDashboard() {
   const [platform, setPlatform] = useState<PlatformType>('instagram');
-  const [loading, setLoading] = useState(false);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiPost, setAiPost] = useState<string | null>(null);
   const [dbUsers, setDbUsers] = useState<Array<Record<string, unknown>>>([]);
+  const [stats, setStats] = useState<AdminStats | null>(null);
 
-  useEffect(() => {
-    fetch('/api/donors')
+  const fetchUsers = useCallback(() => {
+    const token = localStorage.getItem('token') || '';
+    fetch('/api/users', {
+      headers: { 'Authorization': `Bearer ${token}` },
+    })
       .then(res => res.json())
       .then(data => {
         if (Array.isArray(data)) setDbUsers(data);
@@ -24,25 +31,101 @@ export default function AdminDashboard() {
       .catch(console.error);
   }, []);
 
-  const regenerate = () => {
-    setLoading(true);
-    setTimeout(() => setLoading(false), 1000);
+  useEffect(() => {
+    const token = localStorage.getItem('token') || '';
+
+    fetch('/api/admin/stats', {
+      headers: { 'Authorization': `Bearer ${token}` },
+    })
+      .then(res => res.json())
+      .then(data => {
+        if (data && typeof data.totalUsers === 'number') setStats(data);
+      })
+      .catch(console.error);
+
+    fetchUsers();
+  }, [fetchUsers]);
+
+  const handleVerify = async (id: string) => {
+    const token = localStorage.getItem('token') || '';
+    try {
+      const res = await fetch(`/api/users/${id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ avail: 'Available' }),
+      });
+      if (res.ok) fetchUsers();
+    } catch (err) {
+      console.error('Verify failed', err);
+    }
   };
+
+  const handleReject = async (id: string) => {
+    const token = localStorage.getItem('token') || '';
+    try {
+      const res = await fetch(`/api/users/${id}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setDbUsers(prev => prev.filter(u => String(u._id) !== id));
+      }
+    } catch (err) {
+      console.error('Reject failed', err);
+    }
+  };
+
+  const regenerate = async () => {
+    setAiLoading(true);
+    setAiPost(null);
+    const token = localStorage.getItem('token') || '';
+    try {
+      const res = await fetch('/api/ai/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          message: `Generate a short blood donation awareness post for ${platform}`,
+        }),
+      });
+      if (!res.ok) throw new Error('AI error');
+      const data = await res.json();
+      const text = data.reply || data.message || data.response || null;
+      setAiPost(text);
+    } catch {
+      setAiPost('Could not generate post. Please try again.');
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const defaultPosts: Record<PlatformType, string> = {
+    instagram: '🩸 **Did you know?** Thalassemia affects 100,000+ children born in India every year. Regular blood transfusions are life-saving. Join ThalAI Connect and donate today — your one donation can sustain a child for 3 weeks. 💪 #ThalassemiaAwareness #BloodDonation #ThalAIConnect',
+    twitter: 'Every 30 min, a child with thalassemia needs a transfusion in India. Be the hero — register as a donor on ThalAI Connect. Your B+ or O+ blood could be the difference between life and death. 🩸 #DonateBlood #Thalassemia',
+    whatsapp: '🙏 Dear friend,\n\nA thalassemia patient near you needs B+ blood urgently.\n\nDonating takes only 30 minutes and can save a life. If you are eligible, please register on ThalAI Connect.\n\nThank you for caring. ❤️',
+  };
+
+  const displayPost = aiPost ?? defaultPosts[platform];
 
   return (
     <div className="flex flex-col gap-5 animate-in fade-in duration-500">
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <StatCard icon={<Users size={18} />} color="red" val="2,847" label="Total users" change="↑ 12% this month" changeColor="text-green" />
-        <StatCard icon={<ShieldCheck size={18} />} color="green" val="1,203" label="Verified donors" change="↑ 34 new today" changeColor="text-green" />
-        <StatCard icon={<Clock size={18} />} color="amber" val="18" label="Pending verifications" change="Needs review" changeColor="text-red" />
-        <StatCard icon={<Activity size={18} />} color="blue" val="97.3%" label="System uptime" change="↑ All systems go" changeColor="text-green" />
+        <StatCard icon={<Users size={18} />} color="red" val={stats ? String(stats.totalUsers) : '—'} label="Total users" change="↑ 12% this month" changeColor="text-green" />
+        <StatCard icon={<ShieldCheck size={18} />} color="green" val={stats ? String(stats.totalDonors) : '—'} label="Verified donors" change="↑ 34 new today" changeColor="text-green" />
+        <StatCard icon={<Clock size={18} />} color="amber" val={stats ? String(stats.totalPatients) : '—'} label="Total patients" change="Registered patients" changeColor="text-amber" />
+        <StatCard icon={<Activity size={18} />} color="blue" val={stats ? String(stats.activeSOS) : '—'} label="Active SOS alerts" change={stats?.activeSOS ? '⚠ Needs attention' : '↑ All clear'} changeColor={stats?.activeSOS ? 'text-red' : 'text-green'} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-5">
         <div className="card">
            <div className="flex justify-between items-center mb-5">
-              <h2 className="card-title">User Verification Queue</h2>
-              <span className="chip chip-red">18 pending</span>
+              <h2 className="card-title">User Management</h2>
+              <span className="chip chip-red">{dbUsers.length} users</span>
            </div>
            <div className="overflow-x-auto">
              <table className="w-full text-[13px] text-left">
@@ -52,23 +135,21 @@ export default function AdminDashboard() {
                 <tbody className="text-gray-800">
                   {dbUsers.length > 0 ? (
                     dbUsers.map((u, i) => (
-                      <UserRow 
-                        key={String(u._id || i)} 
-                        name={String(u.name || 'Unknown')} 
-                        id={String((u._id as string) || '0000').slice(-4)} 
-                        role={u.role && typeof u.role === 'string' ? u.role.charAt(0).toUpperCase() + u.role.slice(1) : 'Donor'} 
-                        color={u.role === 'patient' ? 'amber' : 'blue'} 
-                        bg={String(u.bloodGroup || 'N/A')} 
-                        loc="India" 
+                      <UserRow
+                        key={String(u._id || i)}
+                        id={String(u._id || '')}
+                        name={String(u.name || 'Unknown')}
+                        shortId={String((u._id as string) || '0000').slice(-4)}
+                        role={u.role && typeof u.role === 'string' ? u.role.charAt(0).toUpperCase() + u.role.slice(1) : 'Donor'}
+                        color={u.role === 'patient' ? 'amber' : 'blue'}
+                        bg={String(u.bloodGroup || 'N/A')}
+                        loc="India"
+                        onVerify={handleVerify}
+                        onReject={handleReject}
                       />
                     ))
                   ) : (
-                    <>
-                      <UserRow name="Kavya Nair" id="4291" role="Donor" color="blue" bg="O+" loc="Mumbai" />
-                      <UserRow name="Rahul Gupta" id="4292" role="Patient" color="amber" bg="A-" loc="Bengaluru" />
-                      <UserRow name="Anjali Singh" id="4293" role="Donor" color="blue" bg="B+" loc="Delhi" />
-                      <UserRow name="Deepak Patel" id="4294" role="Donor" color="blue" bg="AB+" loc="Hyderabad" />
-                    </>
+                    <tr><td colSpan={5} className="py-6 text-center text-gray-400 text-xs">No users found.</td></tr>
                   )}
                 </tbody>
              </table>
@@ -84,13 +165,13 @@ export default function AdminDashboard() {
                <PlatformTab active={platform} type="whatsapp" onClick={setPlatform} label="WhatsApp" />
              </div>
              <div className="bg-gray-50 border border-dashed border-gray-200 rounded-xl p-4 min-h-30 text-[13px] leading-relaxed text-gray-600 whitespace-pre-wrap">
-               {loading ? (
+               {aiLoading ? (
                  <div className="typing mt-2"><span></span><span></span><span></span></div>
                ) : (
-                 <span dangerouslySetInnerHTML={{__html: posts[platform].replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')}}></span>
+                 <span>{renderFormattedText(displayPost)}</span>
                )}
              </div>
-             <button onClick={regenerate} className="mt-3 w-full bg-red text-white text-xs font-semibold py-2.5 rounded-xl hover:bg-red-dark transition-colors flex items-center justify-center gap-1.5">
+             <button onClick={regenerate} disabled={aiLoading} className="mt-3 w-full bg-red text-white text-xs font-semibold py-2.5 rounded-xl hover:bg-red-dark transition-colors flex items-center justify-center gap-1.5 disabled:opacity-60">
                <Wand2 size={14}/> Regenerate with AI
              </button>
            </div>
@@ -101,7 +182,7 @@ export default function AdminDashboard() {
                  <HealthBar label="API Response" val="142ms" pct="88%" color="bg-green" valColor="text-green" />
                  <HealthBar label="Matching Engine" val="Online" pct="100%" color="bg-green" valColor="text-green" />
                  <HealthBar label="AI Assistant" val="Online" pct="100%" color="bg-green" valColor="text-green" />
-                 <HealthBar label="SOS System" val="1 Active" pct="75%" color="bg-amber" valColor="text-amber" />
+                 <HealthBar label="SOS System" val={stats?.activeSOS ? `${stats.activeSOS} Active` : 'Clear'} pct={stats?.activeSOS ? '75%' : '100%'} color={stats?.activeSOS ? 'bg-amber' : 'bg-green'} valColor={stats?.activeSOS ? 'text-amber' : 'text-green'} />
               </div>
            </div>
         </div>
@@ -110,16 +191,38 @@ export default function AdminDashboard() {
   );
 }
 
-function UserRow({name, id, role, color, bg, loc}: { name: string; id: string; role: string; color: string; bg: string; loc: string }) {
+function UserRow({
+  id, name, shortId, role, color, bg, loc, onVerify, onReject,
+}: {
+  id: string;
+  name: string;
+  shortId: string;
+  role: string;
+  color: string;
+  bg: string;
+  loc: string;
+  onVerify: (id: string) => void;
+  onReject: (id: string) => void;
+}) {
   return (
     <tr className="border-b border-gray-50 hover:bg-gray-50/50">
-      <td className="py-3"><strong>{name}</strong><br/><span className="text-[11px] text-gray-400">ID: #{id}</span></td>
+      <td className="py-3"><strong>{name}</strong><br/><span className="text-[11px] text-gray-400">ID: #{shortId}</span></td>
       <td><span className={`chip chip-${color}`}>{role}</span></td>
       <td className="font-semibold text-red">{bg}</td>
       <td>{loc}</td>
       <td>
-        <button className="bg-green-bg text-green px-3 py-1 rounded-lg text-[11px] font-bold mr-1 hover:bg-green/20 transition-colors">Verify</button>
-        <button className="bg-red-glow text-red px-3 py-1 rounded-lg text-[11px] font-bold hover:bg-red/20 transition-colors">Reject</button>
+        <button
+          onClick={() => onVerify(id)}
+          className="bg-green-bg text-green px-3 py-1 rounded-lg text-[11px] font-bold mr-1 hover:bg-green/20 transition-colors"
+        >
+          Verify
+        </button>
+        <button
+          onClick={() => onReject(id)}
+          className="bg-red-glow text-red px-3 py-1 rounded-lg text-[11px] font-bold hover:bg-red/20 transition-colors"
+        >
+          Reject
+        </button>
       </td>
     </tr>
   );

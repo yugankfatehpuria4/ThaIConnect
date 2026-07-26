@@ -1,6 +1,6 @@
 'use client';
 import { useState } from 'react';
-import { Settings, Bell, Shield, Database, Globe, Moon, Sun, Save, CheckCircle2, AlertCircle, Server, Cpu, HardDrive } from 'lucide-react';
+import { Settings, Bell, Shield, Database, Moon, Sun, Save, CheckCircle2, AlertCircle, Server, Cpu } from 'lucide-react';
 
 type SettingSection = {
   id: string;
@@ -16,10 +16,29 @@ const sections: SettingSection[] = [
   { id: 'system', icon: <Server size={18} />, title: 'System', desc: 'Backend, database, and AI services' },
 ];
 
+type SettingsState = {
+  appName: string;
+  timezone: string;
+  language: string;
+  darkMode: boolean;
+  emailNotifs: boolean;
+  pushNotifs: boolean;
+  sosAlerts: boolean;
+  sosSound: boolean;
+  weeklyReport: boolean;
+  twoFactor: boolean;
+  sessionTimeout: string;
+  apiRateLimit: string;
+  backendUrl: string;
+  mongoUri: string;
+  aiServiceUrl: string;
+  matchingThreshold: string;
+};
+
 export default function AdminSettingsPage() {
   const [activeSection, setActiveSection] = useState('general');
   const [saved, setSaved] = useState(false);
-  const [settings, setSettings] = useState({
+  const [settings, setSettings] = useState<SettingsState>({
     appName: 'ThalAI Connect',
     timezone: 'Asia/Kolkata',
     language: 'en',
@@ -43,7 +62,7 @@ export default function AdminSettingsPage() {
     setTimeout(() => setSaved(false), 2000);
   };
 
-  const updateSetting = (key: string, value: any) => {
+  const updateSetting = <K extends keyof SettingsState>(key: K, value: SettingsState[K]) => {
     setSettings(prev => ({ ...prev, [key]: value }));
   };
 

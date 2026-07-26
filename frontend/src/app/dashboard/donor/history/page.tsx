@@ -1,6 +1,6 @@
 'use client';
 import { useState } from 'react';
-import { Activity, Download, ChevronRight, Calendar, MapPin, Clock, Filter, Droplet } from 'lucide-react';
+import { Activity, Download, Calendar, MapPin, Clock, Droplet } from 'lucide-react';
 
 type Donation = {
   id: string;

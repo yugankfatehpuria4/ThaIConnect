@@ -22,4 +22,7 @@ const donorProfileSchema: Schema = new Schema({
   impactPoints: { type: Number, default: 0 },
 }, { timestamps: true });
 
+// Leaderboard sorts by impactPoints desc — avoid a full collection scan + in-memory sort.
+donorProfileSchema.index({ impactPoints: -1 });
+
 export default mongoose.model<IDonorProfile>('DonorProfile', donorProfileSchema);

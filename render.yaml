@@ -1,0 +1,66 @@
+# Render Blueprint — deploys the Express backend and the Flask AI service.
+# The Next.js frontend deploys separately on Vercel (see DEPLOYMENT.md).
+# Secrets marked `sync: false` must be set in the Render dashboard, never here.
+services:
+  - type: web
+    name: thaiconnect-backend
+    runtime: node
+    rootDir: backend
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 5002
+      - key: TRUST_PROXY
+        value: "true"
+      - key: MONGODB_URI
+        sync: false          # Atlas connection string
+      - key: JWT_SECRET
+        sync: false          # 32+ char random secret
+      - key: FRONTEND_ORIGIN
+        sync: false          # e.g. https://thaiconnect.vercel.app
+      - key: AI_SERVICE_URL
+        sync: false          # the AI service URL below, e.g. https://thaiconnect-ai.onrender.com
+      - key: AI_SERVICE_API_KEY
+        sync: false          # shared secret — must match the AI service
+      # Optional delivery channels (SOS still works in-app without them):
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: TWILIO_SID
+        sync: false
+      - key: TWILIO_AUTH
+        sync: false
+      - key: TWILIO_PHONE
+        sync: false
+      - key: HOSPITAL_PHONE
+        sync: false
+
+  - type: web
+    name: thaiconnect-ai
+    runtime: python
+    rootDir: ai-service
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --workers 2 --threads 4 --timeout 60 --bind 0.0.0.0:$PORT app:app
+    healthCheckPath: /api/ml/health
+    envVars:
+      - key: PORT
+        value: 5001
+      - key: OPENAI_BASE_URL
+        value: https://api.x.ai/v1
+      - key: AI_CHAT_MODEL
+        value: grok-3
+      - key: OPENAI_API_KEY
+        sync: false          # xAI key
+      - key: AI_SERVICE_API_KEY
+        sync: false          # same value as the backend's AI_SERVICE_API_KEY
+      - key: BACKEND_ORIGINS
+        sync: false          # the backend URL, e.g. https://thaiconnect-backend.onrender.com

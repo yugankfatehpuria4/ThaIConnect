@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { Trophy, Star, Zap, Heart, Shield, Target, Award, TrendingUp } from 'lucide-react';
+import { Star, Shield, TrendingUp } from 'lucide-react';
 
 type Badge = {
   icon: string;
@@ -70,7 +70,7 @@ export default function AchievementsPage() {
         if (u.name) setUserName(u.name);
         if (u.id) setCurrentUserId(u.id);
       }
-    } catch (e) {}
+    } catch {}
 
     const token = localStorage.getItem('token') || '';
     const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
@@ -305,4 +305,3 @@ export default function AchievementsPage() {
     </div>
   );
 }
-

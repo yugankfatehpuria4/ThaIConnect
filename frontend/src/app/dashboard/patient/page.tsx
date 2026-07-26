@@ -2,11 +2,12 @@
 import { useState, useEffect } from 'react';
 import { Shield, Calendar, Activity, ArrowUp } from 'lucide-react';
 import dynamic from 'next/dynamic';
+import { useSocket } from '@/context/SocketContext';
+import { useToast } from '@/context/ToastContext';
+import { renderFormattedText } from '@/utils/renderFormattedText';
 
 const MapComponent = dynamic(() => import('@/components/MapComponent'), { ssr: false });
 const DASHBOARD_RENDER_REFERENCE_TIME = Date.now();
-
-import { useSocket } from '@/context/SocketContext';
 
 type SosAcceptedPayload = {
   donorName?: string;
@@ -49,12 +50,12 @@ type DashboardMlPrediction = {
 
 export default function PatientDashboard() {
   const { socket } = useSocket();
+  const { showToast } = useToast();
   const [selectedDonor, setSelectedDonor] = useState<string | null>(null);
   const [chatMsgs, setChatMsgs] = useState([
-    { sender: 'AI', text: "Hello Rohan! I'm your ThalAI health assistant. I can help with transfusion reminders, thalassemia FAQs, and emotional support. How can I help today?" },
-    { sender: 'User', text: "When should I get my next transfusion?" },
-    { sender: 'AI', text: "Based on your history, your next transfusion is due **Apr 2** — just 3 days away! Your last Hb was 10.2 g/dL. I've found 4 compatible B+ donors nearby. Shall I send them a request?" }
+    { sender: 'AI', text: "Hello! I'm your ThalAI health assistant. How can I help you today?" },
   ]);
+  const [chatTyping, setChatTyping] = useState(false);
   const [chatInput, setChatInput] = useState('');
   const [timeline, setTimeline] = useState<TimelineResponse | null>(null);
   const [userLocation, setUserLocation] = useState<{lat: number, lng: number} | null>(null);
@@ -74,7 +75,10 @@ export default function PatientDashboard() {
   }
 
   function fetchDonors(lat: number, lng: number) {
-    fetch(`/api/donors/nearby?lat=${lat}&lng=${lng}&maxDistance=10000`)
+    const token = localStorage.getItem('token') || '';
+    fetch(`/api/donors/nearby?lat=${lat}&lng=${lng}&maxDistance=10000`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
       .then(res => res.json())
       .then(data => {
         if (Array.isArray(data)) {
@@ -88,9 +92,12 @@ export default function PatientDashboard() {
     if (!socket) return;
     
     const handleAccepted = (data: SosAcceptedPayload) => {
-      console.log('Donor Acceptance Recieved:', data);
-      // setSosAccepts(prev => [...prev, data]);
-      alert(`Fantastic news! ${data.donorName || 'A brave donor'} has accepted your URGENT SOS blood request. They will be in touch shortly.`);
+      // Non-blocking toast instead of a blocking alert() that freezes the page.
+      showToast(
+        `🩸 ${data.donorName || 'A donor'} accepted your SOS request — they'll be in touch shortly.`,
+        'success',
+        8000,
+      );
     };
 
     socket.on('sos-accepted', handleAccepted);
@@ -98,7 +105,7 @@ export default function PatientDashboard() {
     return () => {
       socket.off('sos-accepted', handleAccepted);
     };
-  }, [socket]);
+  }, [socket, showToast]);
 
   useEffect(() => {
     fetchTimeline();
@@ -128,28 +135,40 @@ export default function PatientDashboard() {
     setupLocation();
   }, []);
 
+  const latestHb = timeline?.history?.length
+    ? timeline.history[timeline.history.length - 1]?.hb
+    : undefined;
+  const avgCycleDays = timeline?.avgCycle;
+
   useEffect(() => {
     let mounted = true;
 
-    const latestHistory = timeline?.history?.length
-      ? timeline.history[timeline.history.length - 1]
-      : null;
+    // Reuse the real blood values the patient entered on the Predictions page.
+    // Without them we don't fabricate a CBC — we skip the ML call and prompt
+    // the patient to complete their report there.
+    let savedVitals: Record<string, number | string> | null = null;
+    try {
+      const raw = typeof window !== 'undefined' ? localStorage.getItem('patientVitals') : null;
+      if (raw) savedVitals = JSON.parse(raw);
+    } catch {
+      savedVitals = null;
+    }
+
+    if (!savedVitals) {
+      setMlPrediction(null);
+      return;
+    }
 
     const requestBody = {
-      age: 24,
-      gender: 'Female',
-      hemoglobin: latestHistory?.hb ?? 9.0,
-      platelets: 168,
-      ferritin: 1200,
-      mcv: 82,
-      mch: 27,
-      mchc: 32,
-      avg_cycle_days: timeline?.avgCycle ?? 21,
+      ...savedVitals,
+      hemoglobin: latestHb ?? savedVitals.hemoglobin,
+      avg_cycle_days: avgCycleDays ?? savedVitals.avgCycleDays ?? 21,
     };
 
     fetch('/api/patient/predictions/model', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify(requestBody),
     })
       .then((response) => response.json())
@@ -167,12 +186,15 @@ export default function PatientDashboard() {
     return () => {
       mounted = false;
     };
-  }, [timeline]);
+  }, [latestHb, avgCycleDays]);
 
   const addTransfusion = () => {
     fetch('/api/patient/timeline', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
+      },
       body: JSON.stringify({ hb: 11.0, units: 1, hospital: 'Local Clinic' })
     })
       .then(res => res.json())
@@ -180,13 +202,31 @@ export default function PatientDashboard() {
       .catch(console.error);
   };
 
-  const sendChat = () => {
-    if(!chatInput.trim()) return;
-    setChatMsgs(prev => [...prev, { sender: 'User', text: chatInput }]);
+  const sendChat = async () => {
+    if (!chatInput.trim()) return;
+    const message = chatInput.trim();
+    setChatMsgs(prev => [...prev, { sender: 'User', text: message }]);
     setChatInput('');
-    setTimeout(() => {
-      setChatMsgs(prev => [...prev, { sender: 'AI', text: "I've noted that! I will schedule a reminder. Stay hydrated and prioritize iron-free meals." }]);
-    }, 1200);
+    setChatTyping(true);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch('/api/ai/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ message }),
+      });
+      if (!res.ok) throw new Error('AI service error');
+      const data = await res.json();
+      const reply = data.reply || data.message || data.response || 'I received your message.';
+      setChatMsgs(prev => [...prev, { sender: 'AI', text: reply }]);
+    } catch {
+      setChatMsgs(prev => [...prev, { sender: 'AI', text: 'AI assistant is temporarily unavailable.' }]);
+    } finally {
+      setChatTyping(false);
+    }
   };
 
   const filteredDonors = donors.filter((donor) => {
@@ -204,8 +244,7 @@ export default function PatientDashboard() {
   const nextDonationDay = timeline ? new Date(timeline.nextTransfusion).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'N/A';
   const transfusionCount = timeline?.history?.length || 0;
   const donorsNearbyCount = filteredDonors.length;
-  const latestHb = timeline?.history?.length ? timeline.history[timeline.history.length - 1].hb : null;
-  const predictedHb = mlPrediction?.predictions?.predictedHemoglobin ?? latestHb;
+  const predictedHb = mlPrediction?.predictions?.predictedHemoglobin ?? latestHb ?? null;
   const hbUrgency = mlPrediction?.predictions?.urgency ?? (predictedHb != null && predictedHb < 9 ? 'HIGH' : 'NORMAL');
 
   return (
@@ -300,10 +339,16 @@ export default function PatientDashboard() {
                <div key={i} className={`flex gap-2 max-w-[85%] ${msg.sender === 'User' ? 'ml-auto flex-row-reverse' : ''}`}>
                  <div className={`w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5 ${msg.sender === 'User' ? 'bg-blue-bg text-blue' : 'bg-red-glow text-red'}`}>{msg.sender === 'User' ? 'R' : 'AI'}</div>
                  <div className={`p-2.5 rounded-xl text-[13px] leading-relaxed ${msg.sender === 'User' ? 'bg-red text-white' : 'bg-gray-50 text-gray-800 border border-gray-100'}`}>
-                    {msg.text.includes('**') ? <span dangerouslySetInnerHTML={{__html: msg.text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')}}></span> : msg.text}
+                    {renderFormattedText(msg.text)}
                  </div>
                </div>
              ))}
+             {chatTyping && (
+               <div className="flex gap-2 max-w-[85%]">
+                 <div className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5 bg-red-glow text-red">AI</div>
+                 <div className="p-2.5 rounded-xl text-[13px] bg-gray-50 text-gray-500 border border-gray-100 italic">Typing...</div>
+               </div>
+             )}
           </div>
           <div className="mt-3 pt-3 border-t border-gray-100 flex gap-2">
             <input value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && sendChat()} placeholder="Ask about thalassemia, diet..." className="flex-1 border border-gray-200 rounded-xl px-3 py-2 text-[13px] outline-none focus:border-red transition-colors" />

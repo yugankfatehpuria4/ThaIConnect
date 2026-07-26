@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import Navbar from '../components/Navbar';
 import AIAssistant from '../components/AIAssistant';
 
@@ -12,23 +12,25 @@ function useCounter(target: number, duration = 2000) {
   const [count, setCount] = useState(0);
   const [started, setStarted] = useState(false);
 
+  const start = useCallback(() => setStarted(true), []);
+
   useEffect(() => {
     if (!started) return;
-    let start = 0;
-    const step = Math.ceil(target / (duration / 16));
+    let current = 0;
+    const step = Math.max(1, Math.ceil(target / (duration / 16)));
     const interval = setInterval(() => {
-      start += step;
-      if (start >= target) {
+      current += step;
+      if (current >= target) {
         setCount(target);
         clearInterval(interval);
       } else {
-        setCount(start);
+        setCount(current);
       }
     }, 16);
     return () => clearInterval(interval);
   }, [started, target, duration]);
 
-  return { count, setStarted };
+  return { count, start };
 }
 
 /* ──────────────────────────────────────────────────────────
@@ -75,28 +77,26 @@ function FeatureCard({ icon, title, desc, accent }: { icon: string; title: strin
    ══════════════════════════════════════════════════════════ */
 export default function Home() {
   const router = useRouter();
-  const donors = useCounter(2800, 2000);
-  const lives = useCounter(1200, 2000);
-  const emergencies = useCounter(150, 2000);
+  const { count: donorCount, start: startDonors } = useCounter(2800, 2000);
+  const { count: livesCount, start: startLives } = useCounter(1200, 2000);
+  const { count: emergencyCount, start: startEmergencies } = useCounter(150, 2000);
 
   useEffect(() => {
-    // Start counters once stats section is in view
+    // Start counters once stats section is in view (stable deps — avoid render loop)
     const observer = new IntersectionObserver(
       (entries) => {
-        entries.forEach(e => {
-          if (e.isIntersecting) {
-            donors.setStarted(true);
-            lives.setStarted(true);
-            emergencies.setStarted(true);
-          }
-        });
+        if (entries.some((e) => e.isIntersecting)) {
+          startDonors();
+          startLives();
+          startEmergencies();
+        }
       },
-      { threshold: 0.3 }
+      { threshold: 0.3 },
     );
     const el = document.getElementById('stats');
     if (el) observer.observe(el);
     return () => observer.disconnect();
-  }, [donors, emergencies, lives]);
+  }, [startDonors, startLives, startEmergencies]);
 
   return (
     <div className="bg-white text-gray-800 w-full overflow-x-hidden">
@@ -185,7 +185,7 @@ export default function Home() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
             <div className="text-center p-8 rounded-2xl bg-white shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
               <h2 className="text-5xl font-bold text-transparent bg-clip-text bg-linear-to-r from-red to-red-dark tabular-nums">
-                {donors.count.toLocaleString()}+
+                {donorCount.toLocaleString()}+
               </h2>
               <p className="text-gray-500 mt-3 font-medium">Registered Donors</p>
               <div className="mt-3 w-12 h-1 bg-red/20 rounded-full mx-auto" />
@@ -193,7 +193,7 @@ export default function Home() {
 
             <div className="text-center p-8 rounded-2xl bg-white shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
               <h2 className="text-5xl font-bold text-transparent bg-clip-text bg-linear-to-r from-red to-red-dark tabular-nums">
-                {lives.count.toLocaleString()}+
+                {livesCount.toLocaleString()}+
               </h2>
               <p className="text-gray-500 mt-3 font-medium">Lives Impacted</p>
               <div className="mt-3 w-12 h-1 bg-red/20 rounded-full mx-auto" />
@@ -201,7 +201,7 @@ export default function Home() {
 
             <div className="text-center p-8 rounded-2xl bg-white shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
               <h2 className="text-5xl font-bold text-transparent bg-clip-text bg-linear-to-r from-red to-red-dark tabular-nums">
-                {emergencies.count.toLocaleString()}+
+                {emergencyCount.toLocaleString()}+
               </h2>
               <p className="text-gray-500 mt-3 font-medium">Emergency Responses</p>
               <div className="mt-3 w-12 h-1 bg-red/20 rounded-full mx-auto" />

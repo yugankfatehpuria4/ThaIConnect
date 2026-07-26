@@ -2,6 +2,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Activity, Droplet, Star, Clock, Download, ChevronRight } from 'lucide-react';
 import { useSocket } from '@/context/SocketContext';
+import { useToast } from '@/context/ToastContext';
 
 type DonationRecord = {
   date: string;
@@ -23,6 +24,7 @@ const defaultDonationHistory: DonationRecord[] = [
 
 export default function DonorDashboard() {
   const { socket } = useSocket();
+  const { showToast } = useToast();
   const [sosList, setSosList] = useState<Array<Record<string, unknown>>>([
     { sosId: 'demo1', bloodGroup: 'B+', hospital: 'AIIMS Delhi', patientName: 'Rohan M.' },
     { sosId: 'demo2', bloodGroup: 'O-', hospital: 'Safdarjung Hospital', patientName: 'Anita V.' },
@@ -67,31 +69,33 @@ export default function DonorDashboard() {
   }, []);
 
   const respondSOS = async (sosId: string, response: string) => {
+    const heroToast = () =>
+      showToast('✅ You accepted — the patient has been notified. Thank you for saving a life! 🩸', 'success', 8000);
+
     // If it's a mock ID (e.g. 'demo1'), handle it entirely on the frontend
     if (!/^[a-f\d]{24}$/i.test(sosId)) {
       setSosList(prev => prev.filter(s => String(s.sosId || s._id || '') !== sosId));
-      if (response === 'accepted') alert('You are a hero! Patient notified.');
+      if (response === 'accepted') heroToast();
       return;
     }
 
     try {
       const res = await fetch('/api/sos/respond', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
-        },
-        body: JSON.stringify({ sosId, response })
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ sosId, response }),
       });
       if (res.ok) {
         setSosList(prev => prev.filter(s => String(s.sosId || s._id || '') !== sosId));
-        if (response === 'accepted') alert('You are a hero! Patient notified.');
+        if (response === 'accepted') heroToast();
       } else {
         const errData = await res.json().catch(() => ({}));
-        console.warn('SOS respond failed:', errData);
+        showToast(errData.error || 'Could not record your response — it may already be handled.', 'error');
       }
     } catch (err) {
       console.error(err);
+      showToast('Network error — please check your connection and try again.', 'error');
     }
   };
 

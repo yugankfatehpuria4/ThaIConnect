@@ -20,6 +20,8 @@ export interface ISOSAlert extends Document {
   acceptedDonor?: mongoose.Types.ObjectId;
   targetedDonor?: mongoose.Types.ObjectId;
   requestType: 'sos' | 'direct';
+  escalated?: boolean;
+  escalateAt?: Date;
   deliveryLogs: {
     channel: 'socket' | 'email';
     recipientUserId?: mongoose.Types.ObjectId;
@@ -57,6 +59,10 @@ const sosSchema: Schema = new Schema(
     acceptedDonor: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     targetedDonor: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     requestType: { type: String, enum: ['sos', 'direct'], default: 'sos' },
+    // Persistent auto-escalation: a background sweeper escalates active alerts
+    // once escalateAt passes. Stored in the DB so a restart never loses one.
+    escalated: { type: Boolean, default: false },
+    escalateAt: { type: Date },
     deliveryLogs: [
       {
         channel: { type: String, enum: ['socket', 'email'], required: true },
@@ -74,5 +80,10 @@ const sosSchema: Schema = new Schema(
 );
 
 sosSchema.index({ location: '2dsphere' });
+// Patient history lookups (SOSAlert.find({ patientId, status })).
+sosSchema.index({ patientId: 1, status: 1 });
+// Used by the escalation sweeper to find un-escalated / expiring active alerts.
+sosSchema.index({ status: 1, expiresAt: 1 });
+sosSchema.index({ status: 1, escalated: 1, escalateAt: 1 });
 
 export default mongoose.model<ISOSAlert>('SOSAlert', sosSchema);

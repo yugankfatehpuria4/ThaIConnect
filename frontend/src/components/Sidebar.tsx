@@ -25,6 +25,36 @@ type NavConfigType = {
   [key: string]: RoleConfig;
 };
 
+type UserSnapshot = {
+  name: string;
+  role: 'patient' | 'donor' | 'admin';
+  initials: string;
+};
+
+function readUserSnapshot(fallbackRole: 'patient' | 'donor' | 'admin'): UserSnapshot {
+  try {
+    const stored = localStorage.getItem('user');
+    if (!stored) {
+      return { name: 'User', role: fallbackRole, initials: 'U' };
+    }
+
+    const user = JSON.parse(stored) as { name?: string; role?: 'patient' | 'donor' | 'admin' };
+    const name = user.name || 'User';
+    const initials = name
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((part) => part[0])
+      .join('')
+      .toUpperCase()
+      .slice(0, 2) || 'U';
+
+    return { name, role: user.role || fallbackRole, initials };
+  } catch {
+    return { name: 'User', role: fallbackRole, initials: 'U' };
+  }
+}
+
 const navConfig: NavConfigType = {
   patient: {
     nav: [
@@ -66,31 +96,27 @@ const navConfig: NavConfigType = {
   }
 };
 
-export default function Sidebar({ role }: { role: 'patient' | 'donor' | 'admin' }) {
+type SidebarProps = {
+  role: 'patient' | 'donor' | 'admin';
+  mobileOpen?: boolean;
+  onCloseAction?: () => void;
+};
+
+export default function Sidebar({ role, mobileOpen = false, onCloseAction }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const config = navConfig[role] || navConfig.patient;
+  const [userSnapshot, setUserSnapshot] = useState<UserSnapshot>({ name: 'User', role, initials: 'U' });
 
-  // Read real user data from localStorage
-  const [userName, setUserName] = useState('User');
-  const [userRole, setUserRole] = useState(role);
-  const [userInitials, setUserInitials] = useState('U');
   const [availableDonorBadge, setAvailableDonorBadge] = useState<string | null>(null);
 
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem('user');
-      if (stored) {
-        const u = JSON.parse(stored);
-        if (u.name) {
-          setUserName(u.name);
-          const parts = u.name.trim().split(' ');
-          setUserInitials(parts.map((p: string) => p[0]).join('').toUpperCase().slice(0, 2));
-        }
-        if (u.role) setUserRole(u.role);
-      }
-    } catch (e) { /* ignore parse errors */ }
-  }, []);
+    const timer = window.setTimeout(() => {
+      setUserSnapshot(readUserSnapshot(role));
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [role]);
 
   useEffect(() => {
     if (role !== 'patient') {
@@ -98,7 +124,10 @@ export default function Sidebar({ role }: { role: 'patient' | 'donor' | 'admin' 
     }
 
     const fetchNearbyDonorCount = (lat: number, lng: number) => {
-      fetch(`/api/donors/nearby?lat=${lat}&lng=${lng}&maxDistance=10000`)
+      const token = localStorage.getItem('token') || '';
+      fetch(`/api/donors/nearby?lat=${lat}&lng=${lng}&maxDistance=10000`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
         .then((response) => response.json())
         .then((data) => {
           if (!Array.isArray(data)) {
@@ -132,17 +161,31 @@ export default function Sidebar({ role }: { role: 'patient' | 'donor' | 'admin' 
     fetchNearbyDonorCount(28.6139, 77.2090);
   }, [role]);
 
-  const handleLogout = () => {
-    localStorage.removeItem('token');
+  const handleLogout = async () => {
+    // Clear the httpOnly session cookie server-side (JS can't touch it), then
+    // drop local display state and leave.
+    try {
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+    } catch {
+      /* even if the call fails, still clear local state below */
+    }
     localStorage.removeItem('role');
     localStorage.removeItem('user');
+    localStorage.removeItem('patientVitals');
     router.replace('/login');
   };
 
-  const roleLabel = userRole === 'patient' ? 'Patient' : userRole === 'donor' ? 'Donor' : 'Administrator';
+  const roleLabel = userSnapshot.role === 'patient' ? 'Patient' : userSnapshot.role === 'donor' ? 'Donor' : 'Administrator';
 
   return (
-    <nav className="w-55 bg-white border-r border-gray-100 flex flex-col fixed top-0 left-0 h-full z-50">
+    <>
+      {/* Mobile backdrop — tap to close the drawer */}
+      {mobileOpen && (
+        <div className="fixed inset-0 bg-black/40 z-40 md:hidden" onClick={onCloseAction} aria-hidden="true" />
+      )}
+      <nav
+        className={`w-55 bg-white border-r border-gray-100 flex flex-col fixed top-0 left-0 h-full z-50 transition-transform duration-300 md:translate-x-0 ${mobileOpen ? 'translate-x-0' : '-translate-x-full'}`}
+      >
       <div className="p-5 border-b border-gray-100 flex items-center gap-2.5">
         <div className="w-8.5 h-8.5 bg-red-glow rounded-lg flex items-center justify-center text-red">
           <Shield size={18} fill="currentColor" />
@@ -166,7 +209,7 @@ export default function Sidebar({ role }: { role: 'patient' | 'donor' | 'admin' 
               return (
                 <button
                   key={item.id}
-                  onClick={() => item.path && router.push(item.path)}
+                  onClick={() => { if (item.path) { router.push(item.path); onCloseAction?.(); } }}
                   className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[13.5px] font-medium transition-colors mb-0.5 ${isActive ? 'bg-red-glow text-red' : 'text-gray-600 hover:bg-gray-50 hover:text-gray-800'}`}
                 >
                   <span className={`opacity-70 ${isActive ? 'opacity-100' : ''}`}>{item.icon}</span>
@@ -186,10 +229,10 @@ export default function Sidebar({ role }: { role: 'patient' | 'donor' | 'admin' 
       <div className="p-4 border-t border-gray-100 mt-auto">
         <div className="flex items-center gap-2 p-2.5 bg-gray-50 rounded-lg mb-2">
           <div className="w-7.5 h-7.5 rounded-full bg-red flex items-center justify-center text-white text-xs font-semibold shrink-0">
-            {userInitials}
+            {userSnapshot.initials}
           </div>
           <div className="flex-1 truncate">
-            <div className="text-[12.5px] font-semibold text-gray-800 truncate">{userName}</div>
+            <div className="text-[12.5px] font-semibold text-gray-800 truncate">{userSnapshot.name}</div>
             <div className="text-[10px] text-gray-400 truncate">{roleLabel}</div>
           </div>
         </div>
@@ -201,7 +244,7 @@ export default function Sidebar({ role }: { role: 'patient' | 'donor' | 'admin' 
           Log Out
         </button>
       </div>
-    </nav>
+      </nav>
+    </>
   );
 }
-

@@ -87,9 +87,14 @@ def main() -> None:
         "Sex  ": "gender",
     }, inplace=True)
 
+    # NOTE: use the dataset's true ferritin column only. "FERRITTE" is this
+    # source's (misspelled) ferritin field, with real ng/mL values. Serum iron
+    # is a DIFFERENT lab test (different reference range) and must never be
+    # relabelled as ferritin, so it is deliberately not mapped here.
     df4.rename(columns={
-        "Serum_Iron": "ferritin",
         "FERRITTE": "ferritin",
+        "Ferritin": "ferritin",
+        "FERRITIN": "ferritin",
     }, inplace=True)
 
     for column in ["gender", "hemoglobin"]:

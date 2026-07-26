@@ -21,12 +21,15 @@ export default function LoginPage() {
       const loginRes = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include', // receive the httpOnly session cookie
         body: JSON.stringify(formData),
       });
 
       if (loginRes.ok) {
         const data = await loginRes.json();
-        localStorage.setItem('token', data.token);
+        // The JWT now lives only in an httpOnly cookie the browser can't read.
+        // We keep just non-sensitive display info for the UI; the server is the
+        // sole authority on authorization.
         localStorage.setItem('role', data.user.role);
         localStorage.setItem('user', JSON.stringify(data.user));
         router.replace(`/dashboard/${data.user.role}`);

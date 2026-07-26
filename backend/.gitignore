@@ -1,0 +1,17 @@
+# Secrets — never commit real env files
+.env
+.env.*
+!.env.example
+
+# Dependencies & build
+node_modules/
+dist/
+build/
+
+# Logs & OS
+*.log
+npm-debug.log*
+.DS_Store
+
+# Trained model backups (large binaries)
+ml-data/_legacy_models_backup/

@@ -1,7 +1,6 @@
 'use client';
-import { useState, useEffect } from 'react';
-import { Users, Search, Filter, Trash2, Edit3, ChevronDown, Shield, AlertCircle, CheckCircle2, X } from 'lucide-react';
-import { useRouter } from 'next/navigation';
+import { useCallback, useEffect, useState } from 'react';
+import { Search, Trash2, Edit3, AlertCircle, X } from 'lucide-react';
 
 type User = {
   _id: string;
@@ -16,7 +15,6 @@ type User = {
 };
 
 export default function AdminUsersPage() {
-  const router = useRouter();
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -25,28 +23,14 @@ export default function AdminUsersPage() {
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [accessError, setAccessError] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetchUsers();
-  }, []);
-
-  const fetchUsers = () => {
+  const fetchUsers = useCallback(() => {
     setLoading(true);
-    const token = localStorage.getItem('token') || '';
-    if (!token) {
-      setAccessError('Please login as admin to view users.');
-      setLoading(false);
-      router.replace('/login');
-      return;
-    }
-
-    fetch('/api/users', {
-      headers: { Authorization: `Bearer ${token}` },
-    })
+    // Auth is the httpOnly session cookie (sent automatically same-origin);
+    // the server returns 401/403 if the session is missing or not an admin.
+    fetch('/api/users', { credentials: 'include' })
       .then(async (res) => {
         if (res.status === 401) {
           setAccessError('Session expired. Please login again.');
-          localStorage.removeItem('token');
-          router.replace('/login');
           return [];
         }
         if (res.status === 403) {
@@ -60,7 +44,11 @@ export default function AdminUsersPage() {
       })
       .catch(console.error)
       .finally(() => setLoading(false));
-  };
+  }, []);
+
+  useEffect(() => {
+    fetchUsers();
+  }, [fetchUsers]);
 
   const handleDelete = async (id: string) => {
     try {

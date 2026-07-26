@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { Search, MapPin, Filter, ChevronRight, Star } from 'lucide-react';
+import { Search, MapPin, Star } from 'lucide-react';
 import dynamic from 'next/dynamic';
 
 const MapComponent = dynamic(() => import('@/components/MapComponent'), { ssr: false });
@@ -39,6 +39,7 @@ export default function FindDonorsPage() {
   const [userLocation, setUserLocation] = useState<{lat: number, lng: number} | null>(null);
   const [requestLoadingId, setRequestLoadingId] = useState<string | null>(null);
   const [requestMessage, setRequestMessage] = useState<string | null>(null);
+  const [requestedIds, setRequestedIds] = useState<Set<string>>(new Set());
   const [profileLoading, setProfileLoading] = useState(false);
   const [activeProfile, setActiveProfile] = useState<DonorProfile | null>(null);
 
@@ -64,7 +65,9 @@ export default function FindDonorsPage() {
 
   const fetchDonors = (lat: number, lng: number) => {
     setLoading(true);
-    fetch(`/api/donors/nearby?lat=${lat}&lng=${lng}&maxDistance=10000`)
+    fetch(`/api/donors/nearby?lat=${lat}&lng=${lng}&maxDistance=10000`, {
+      credentials: 'include',
+    })
       .then(res => res.json())
       .then(data => {
         if (Array.isArray(data)) setDonors(data);
@@ -87,16 +90,20 @@ export default function FindDonorsPage() {
     try {
       const res = await fetch('/api/patient/donation-request', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
-        },
-        body: JSON.stringify({ donorId: donor._id, hospital: 'AIIMS Delhi' }),
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ donorId: donor._id }),
       });
       const data = await res.json();
       if (!res.ok) {
+        // 409 = already requested this donor. Mark it so the button locks.
+        if (res.status === 409) {
+          setRequestedIds((prev) => new Set(prev).add(donor._id));
+        }
         throw new Error(data?.error || 'Failed to send donation request');
       }
+      // One request per donor — lock the button for this donor.
+      setRequestedIds((prev) => new Set(prev).add(donor._id));
       setRequestMessage(data?.message || `Donation request sent to ${donor.name}`);
     } catch (error) {
       setRequestMessage(error instanceof Error ? error.message : 'Failed to send donation request');
@@ -108,7 +115,9 @@ export default function FindDonorsPage() {
   const handleViewProfile = async (donorId: string) => {
     setProfileLoading(true);
     try {
-      const res = await fetch(`/api/donors/${donorId}/profile`);
+      const res = await fetch(`/api/donors/${donorId}/profile`, {
+        credentials: 'include',
+      });
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data?.error || 'Failed to fetch donor profile');
@@ -229,10 +238,14 @@ export default function FindDonorsPage() {
                       e.stopPropagation();
                       handleRequestDonation(d);
                     }}
-                    disabled={requestLoadingId === d._id}
-                    className="flex-1 bg-red hover:bg-red-dark text-white py-2.5 rounded-xl text-sm font-semibold transition-colors disabled:opacity-60"
+                    disabled={requestLoadingId === d._id || requestedIds.has(d._id)}
+                    className="flex-1 bg-red hover:bg-red-dark text-white py-2.5 rounded-xl text-sm font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
                   >
-                    {requestLoadingId === d._id ? 'Sending Request...' : 'Request Donation'}
+                    {requestedIds.has(d._id)
+                      ? 'Request Sent ✓'
+                      : requestLoadingId === d._id
+                        ? 'Sending Request...'
+                        : 'Request Donation'}
                   </button>
                   <button
                     onClick={(e) => {

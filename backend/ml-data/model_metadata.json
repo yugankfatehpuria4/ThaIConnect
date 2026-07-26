@@ -1,0 +1,97 @@
+{
+  "models": {
+    "binary": {
+      "file": "anemia_binary.joblib",
+      "features": [
+        "Gender",
+        "Hemoglobin",
+        "MCH",
+        "MCHC",
+        "MCV"
+      ],
+      "labels": {
+        "0": "No Anemia",
+        "1": "Anemia"
+      },
+      "test_accuracy": 1.0,
+      "n_rows": 1421
+    },
+    "type": {
+      "file": "anemia_type.joblib",
+      "features": [
+        "WBC",
+        "LYMp",
+        "NEUTp",
+        "LYMn",
+        "NEUTn",
+        "RBC",
+        "HGB",
+        "HCT",
+        "MCV",
+        "MCH",
+        "MCHC",
+        "PLT",
+        "PDW",
+        "PCT"
+      ],
+      "labels": {
+        "0": "Healthy",
+        "1": "Iron deficiency anemia",
+        "2": "Leukemia",
+        "3": "Leukemia with thrombocytopenia",
+        "4": "Macrocytic anemia",
+        "5": "Normocytic hypochromic anemia",
+        "6": "Normocytic normochromic anemia",
+        "7": "Other microcytic anemia",
+        "8": "Thrombocytopenia"
+      },
+      "test_accuracy": 0.9883,
+      "n_rows": 1281
+    },
+    "hgb": {
+      "file": "hgb_regressor.joblib",
+      "features": [
+        "age",
+        "sex",
+        "rbc",
+        "pcv",
+        "mcv",
+        "mch",
+        "mchc",
+        "rdw",
+        "tlc",
+        "plt__per_mm3"
+      ],
+      "target": "hemoglobin",
+      "test_r2": 0.9372,
+      "test_mae": 0.3709,
+      "n_rows": 364
+    },
+    "thal": {
+      "file": "thal_screener.joblib",
+      "features": [
+        "age",
+        "sex",
+        "rbc",
+        "hemoglobin",
+        "mcv",
+        "mch",
+        "mchc",
+        "rdw"
+      ],
+      "labels": {
+        "0": "Beta Thalassaemia",
+        "1": "HbE",
+        "2": "Normal",
+        "3": "Other Variant"
+      },
+      "normal_label": "Normal",
+      "screening_threshold": 0.2,
+      "test_accuracy": 0.8845,
+      "screening_sensitivity": 0.8032,
+      "screening_specificity": 0.8115,
+      "n_rows": 13025,
+      "note": "CBC-only thalassaemia/hemoglobinopathy screen. Flag when P(abnormal) >= screening_threshold. A flag means 'refer for confirmatory HPLC', NOT a diagnosis."
+    }
+  }
+}

@@ -2,7 +2,6 @@
 
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-// import { useUser } from '@clerk/nextjs';
 
 type UserRole = 'patient' | 'donor' | 'admin';
 
@@ -14,7 +13,6 @@ function isUserRole(value: unknown): value is UserRole {
 
 export default function DashboardRedirectPage() {
   const router = useRouter();
-  // const { user, isLoaded } = useUser();
 
   useEffect(() => {
     const localRole = typeof window !== 'undefined' ? localStorage.getItem('role') : null;

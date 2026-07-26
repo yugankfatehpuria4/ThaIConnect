@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useContext, useEffect, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 
 interface SocketContextType {
@@ -15,70 +15,73 @@ export const useSocket = () => useContext(SocketContext);
 export const SocketProvider = ({ children }: { children: React.ReactNode }) => {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
-  const hasWarnedTransportFallback = useRef(false);
 
   useEffect(() => {
-    // Determine backend URL (usually port 5002 locally)
-    const backendUrl = process.env.NEXT_PUBLIC_SOCKET_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5002';
-    const socketPath = process.env.NEXT_PUBLIC_SOCKET_PATH || '/socket.io';
-    
-    const socketInstance = io(backendUrl, {
-      path: socketPath,
-      transports: ['polling', 'websocket'],
-      tryAllTransports: true,
-      upgrade: true,
-      autoConnect: true,
-      reconnection: true,
-      reconnectionAttempts: 20,
-      reconnectionDelay: 800,
-      reconnectionDelayMax: 4000,
-      timeout: 10000,
-      withCredentials: false,
-    });
+    let socketInstance: Socket | null = null;
+    let cancelled = false;
+    let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
-    socketInstance.on('connect', () => {
-      setIsConnected(true);
-      hasWarnedTransportFallback.current = false;
-      console.log('🔗 Live Socket.IO attached:', socketInstance.id);
-      
-      // Auto-join personal room based on stored User ID if logged in
-      const localUserStr = localStorage.getItem('user');
-      if (localUserStr) {
-        try {
-          const u = JSON.parse(localUserStr);
-          const roomId = u?._id || u?.id;
-          if (roomId) {
-            socketInstance.emit('join', roomId);
-          }
-        } catch (e) {
-          console.error(e);
-        }
-      } else {
-        // Fallback for mocked non-auth testing
-        socketInstance.emit('join', '000000000000000000000000');
+    // The httpOnly session cookie can't reach the cross-origin socket, so we
+    // exchange it (via the same-origin /api proxy) for a short-lived ticket and
+    // authenticate the handshake with that. The server derives identity from
+    // the ticket and auto-joins the user's own room — the client no longer
+    // tells the server which room to join.
+    async function fetchTicket(): Promise<string | null> {
+      try {
+        const res = await fetch('/api/auth/socket-ticket', { credentials: 'include' });
+        if (!res.ok) return null;
+        const data = await res.json();
+        return typeof data?.ticket === 'string' ? data.ticket : null;
+      } catch {
+        return null;
       }
-    });
+    }
 
-    socketInstance.on('disconnect', () => {
-      setIsConnected(false);
-    });
+    (async () => {
+      const ticket = await fetchTicket();
+      if (cancelled || !ticket) return; // not signed in → no socket
 
-    socketInstance.on('connect_error', (error) => {
-      const message = error?.message || 'Unknown socket connection error';
-      if (message.toLowerCase().includes('websocket')) {
-        if (!hasWarnedTransportFallback.current) {
-          console.warn('Socket transport fallback: websocket unavailable, using polling.');
-          hasWarnedTransportFallback.current = true;
+      const backendUrl = process.env.NEXT_PUBLIC_SOCKET_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5002';
+      const socketPath = process.env.NEXT_PUBLIC_SOCKET_PATH || '/socket.io';
+
+      socketInstance = io(backendUrl, {
+        path: socketPath,
+        transports: ['polling', 'websocket'],
+        withCredentials: true,
+        auth: { token: ticket },
+        reconnection: true,
+        reconnectionAttempts: 20,
+        reconnectionDelay: 800,
+        reconnectionDelayMax: 4000,
+        timeout: 10000,
+      });
+
+      socketInstance.on('connect', () => {
+        setSocket(socketInstance);
+        setIsConnected(true);
+      });
+
+      socketInstance.on('disconnect', () => setIsConnected(false));
+
+      socketInstance.on('connect_error', async () => {
+        // Most likely the 60s ticket expired — mint a fresh one for the retry.
+        const fresh = await fetchTicket();
+        if (fresh && socketInstance) {
+          socketInstance.auth = { token: fresh };
         }
-        return;
-      }
-      console.warn('Socket connection issue:', message);
-    });
+      });
 
-    setSocket(socketInstance);
+      // Keep a fresh ticket ready ahead of the 60s expiry so reconnects succeed.
+      refreshTimer = setInterval(async () => {
+        const fresh = await fetchTicket();
+        if (fresh && socketInstance) socketInstance.auth = { token: fresh };
+      }, 45000);
+    })();
 
     return () => {
-      socketInstance.disconnect();
+      cancelled = true;
+      if (refreshTimer) clearInterval(refreshTimer);
+      if (socketInstance) socketInstance.disconnect();
     };
   }, []);
 

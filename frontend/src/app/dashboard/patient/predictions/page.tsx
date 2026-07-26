@@ -1,6 +1,6 @@
 'use client';
 
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   Activity,
@@ -23,13 +23,13 @@ type HbPoint = {
 
 type DonorCandidate = {
   name: string;
-  distanceKm: number;
-  compatibility: number;
+  distanceKm?: number;
+  compatibility?: number;
   availability: number;
   donationHistory: number;
   lastDonation: string;
   bloodGroup: string;
-  city: string;
+  city?: string;
 };
 
 type RiskReason = {
@@ -55,6 +55,16 @@ type OcrSummary = {
   notes: string[];
 };
 
+type ThalassaemiaScreen = {
+  flagged: boolean;
+  riskProbability: number;
+  likelyType: string | null;
+  likelyTypeProbability: number | null;
+  recommendation: string;
+  screeningThreshold: number;
+  disclaimer: string;
+};
+
 type MlPredictionResponse = {
   modelDriven: boolean;
   predictions: {
@@ -68,12 +78,34 @@ type MlPredictionResponse = {
     requiredUnits: number;
     expectedCycleDays: number;
     declineRate: number;
+    thalassaemiaScreen?: ThalassaemiaScreen;
   };
 };
 
+// Editable clinical inputs for one patient. Seeded from sensible defaults, then
+// overwritten by what the patient enters or what OCR extracts from their report.
+// This replaces the previous hard-coded single-patient profile so every patient
+// gets predictions from their OWN blood values.
+type PatientVitals = {
+  age: number;
+  gender: 'Male' | 'Female';
+  hemoglobin: number;
+  rbc: number;
+  mcv: number;
+  mch: number;
+  mchc: number;
+  rdw: number;
+  platelets: number;
+  ferritin: number;
+  avgCycleDays: number;
+};
+
+// Fallback defaults only — used to seed the editable vitals form and to fill
+// gaps when an uploaded report is missing a field. NOT shown as any real
+// patient's data; the patient edits these on the page.
 const patientProfile = {
   age: 24,
-  gender: 'Female',
+  gender: 'Female' as 'Male' | 'Female',
   bloodGroup: 'B+',
   lastTransfusion: '2026-04-01',
   avgCycleDays: 21,
@@ -82,9 +114,11 @@ const patientProfile = {
   daysBetweenReadings: 21,
   platelets: 168,
   ferritin: 1200,
+  rbc: 4.1,
   mcv: 82,
   mch: 27,
   mchc: 32,
+  rdw: 13.5,
   facility: 'AIIMS Delhi',
   city: 'New Delhi',
 };
@@ -99,48 +133,8 @@ const hbData: HbPoint[] = [
   { date: 'May 16', level: 8.1, type: 'predicted' },
 ];
 
-const donorCandidates: DonorCandidate[] = [
-  {
-    name: 'Arjun',
-    distanceKm: 2.4,
-    compatibility: 98,
-    availability: 96,
-    donationHistory: 92,
-    lastDonation: '18 days ago',
-    bloodGroup: 'B+',
-    city: 'Connaught Place',
-  },
-  {
-    name: 'Priya',
-    distanceKm: 3.1,
-    compatibility: 94,
-    availability: 92,
-    donationHistory: 90,
-    lastDonation: '24 days ago',
-    bloodGroup: 'B+',
-    city: 'South Delhi',
-  },
-  {
-    name: 'Rahul',
-    distanceKm: 4.8,
-    compatibility: 91,
-    availability: 88,
-    donationHistory: 84,
-    lastDonation: '31 days ago',
-    bloodGroup: 'O+',
-    city: 'Noida',
-  },
-  {
-    name: 'Nadia',
-    distanceKm: 6.2,
-    compatibility: 89,
-    availability: 85,
-    donationHistory: 87,
-    lastDonation: '14 days ago',
-    bloodGroup: 'B+',
-    city: 'Gurugram',
-  },
-];
+// Donor candidates are fetched live from the backend (see the component below).
+// No hard-coded donors — the list reflects real registered donors.
 
 function extractNumber(text: string, patterns: RegExp[]) {
   for (const pattern of patterns) {
@@ -334,18 +328,29 @@ function buildRiskReasons(hb: number, platelets: number, ferritin: number): Risk
 }
 
 function scoreDonor(candidate: DonorCandidate) {
-  const proximityScore = clamp(100 - candidate.distanceKm * 10, 0, 100);
+  const compatibility = candidate.compatibility ?? 70;
+  const proximityScore = candidate.distanceKm != null ? clamp(100 - candidate.distanceKm * 10, 0, 100) : 60;
   return Math.round(
-    candidate.compatibility * 0.45 +
+    compatibility * 0.45 +
       proximityScore * 0.2 +
       candidate.availability * 0.2 +
       candidate.donationHistory * 0.15,
   );
 }
 
+function relativeDays(iso?: string): string {
+  if (!iso) return 'No recent donation';
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return 'No recent donation';
+  const days = Math.max(0, Math.round((Date.now() - then) / (1000 * 60 * 60 * 24)));
+  return days === 0 ? 'Donated today' : `${days} days ago`;
+}
+
 async function renderPdfPagesForOcr(file: File, pageLimit = 2) {
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
-  pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/legacy/build/pdf.worker.min.mjs`;
+  // Served locally from /public (copied from the pinned pdfjs-dist) — no runtime
+  // CDN dependency / supply-chain risk, and it works under a strict CSP.
+  pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
   const data = await file.arrayBuffer();
   const loadingTask = pdfjs.getDocument({ data });
@@ -517,10 +522,59 @@ export default function PredictionsPage() {
   const [mlError, setMlError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  // Real, per-patient clinical inputs (editable). Seeded from defaults; the
+  // patient corrects them in the "Your latest blood report" panel, and OCR
+  // upload pre-fills them. Every prediction below runs on THESE values.
+  const [vitals, setVitals] = useState<PatientVitals>(() => ({
+    age: patientProfile.age,
+    gender: patientProfile.gender,
+    hemoglobin: patientProfile.currentHb,
+    rbc: patientProfile.rbc,
+    mcv: patientProfile.mcv,
+    mch: patientProfile.mch,
+    mchc: patientProfile.mchc,
+    rdw: patientProfile.rdw,
+    platelets: patientProfile.platelets,
+    ferritin: patientProfile.ferritin,
+    avgCycleDays: patientProfile.avgCycleDays,
+  }));
+  const [patientName, setPatientName] = useState<string>('');
+
+  // Persist the patient's entered blood values so other views (e.g. the
+  // dashboard) can reuse them instead of fabricating medical data.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      localStorage.setItem('patientVitals', JSON.stringify(vitals));
+    } catch {
+      /* storage unavailable — non-fatal */
+    }
+  }, [vitals]);
+
+  // Personalise from the signed-in user (name only — no medical data is stored
+  // at registration, which is why the patient enters their blood values here).
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const raw = localStorage.getItem('user');
+      if (raw) {
+        const u = JSON.parse(raw);
+        if (u?.name) setPatientName(String(u.name).split(' ')[0]);
+      }
+      const savedVitals = localStorage.getItem('patientVitals');
+      if (savedVitals) {
+        const parsed = JSON.parse(savedVitals);
+        setVitals((v) => ({ ...v, ...parsed }));
+      }
+    } catch {
+      /* ignore malformed cache */
+    }
+  }, []);
+
   const today = new Date();
-  const activeHemoglobin = ocrSummary?.hemoglobin ?? patientProfile.currentHb;
-  const activePlatelets = ocrSummary?.platelets ?? patientProfile.platelets;
-  const activeFerritin = ocrSummary?.ferritin ?? patientProfile.ferritin;
+  const activeHemoglobin = ocrSummary?.hemoglobin ?? vitals.hemoglobin;
+  const activePlatelets = ocrSummary?.platelets ?? vitals.platelets;
+  const activeFerritin = ocrSummary?.ferritin ?? vitals.ferritin;
   const activeLastTransfusionDate = ocrSummary?.lastTransfusionDate
     ? new Date(ocrSummary.lastTransfusionDate)
     : new Date(patientProfile.lastTransfusion);
@@ -540,18 +594,44 @@ export default function PredictionsPage() {
   const riskBadge = getRiskBadge(riskScore);
   const riskReasons = buildRiskReasons(modelPredictedHemoglobin, activePlatelets, activeFerritin);
 
-  const rankedDonors = useMemo(
-    () =>
-      [...donorCandidates]
-        .map((candidate) => ({ ...candidate, score: scoreDonor(candidate) }))
-        .sort((left, right) => right.score - left.score),
-    [],
-  );
+  const [rankedDonors, setRankedDonors] = useState<Array<DonorCandidate & { score: number }>>([]);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const res = await fetch('/api/donors', { credentials: 'include' });
+        if (!res.ok) return;
+        const data = await res.json();
+        const raw = Array.isArray(data) ? data : data?.donors ?? [];
+        const list: DonorCandidate[] = raw.map((d: { name?: string; bloodGroup?: string; avail?: string; donationsCount?: number; lastDonated?: string }) => ({
+          name: d.name ?? 'Donor',
+          bloodGroup: d.bloodGroup ?? '—',
+          availability: d.avail === 'Available' ? 100 : 45,
+          donationHistory: clamp(Number(d.donationsCount ?? 0) * 10, 0, 100),
+          lastDonation: relativeDays(d.lastDonated),
+        }));
+        const ranked = list.map((c) => ({ ...c, score: scoreDonor(c) })).sort((a, b) => b.score - a.score);
+        if (mounted) setRankedDonors(ranked);
+      } catch {
+        /* leave empty — the UI shows an honest empty state */
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     const timer = setTimeout(() => setLoading(false), 900);
     return () => clearTimeout(timer);
   }, []);
+
+  // Effective values: an uploaded report overrides typed values for the fields
+  // OCR can read; everything else comes from the editable vitals.
+  const hbForModel = ocrSummary?.hemoglobin ?? vitals.hemoglobin;
+  const plateletsForModel = ocrSummary?.platelets ?? vitals.platelets;
+  const ferritinForModel = ocrSummary?.ferritin ?? vitals.ferritin;
 
   useEffect(() => {
     let mounted = true;
@@ -559,19 +639,24 @@ export default function PredictionsPage() {
     async function fetchModelPrediction() {
       try {
         setMlError(null);
+        // Auth travels via the httpOnly session cookie (same-origin /api proxy),
+        // so no token is read from JS here.
         const response = await fetch('/api/patient/predictions/model', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify({
-            age: patientProfile.age,
-            gender: patientProfile.gender,
-            hemoglobin: activeHemoglobin,
-            platelets: activePlatelets,
-            ferritin: activeFerritin,
-            mcv: patientProfile.mcv,
-            mch: patientProfile.mch,
-            mchc: patientProfile.mchc,
-            avg_cycle_days: patientProfile.avgCycleDays,
+            age: vitals.age,
+            gender: vitals.gender,
+            hemoglobin: hbForModel,
+            rbc: vitals.rbc,
+            platelets: plateletsForModel,
+            ferritin: ferritinForModel,
+            mcv: vitals.mcv,
+            mch: vitals.mch,
+            mchc: vitals.mchc,
+            rdw: vitals.rdw,
+            avg_cycle_days: vitals.avgCycleDays,
           }),
         });
 
@@ -596,7 +681,11 @@ export default function PredictionsPage() {
     return () => {
       mounted = false;
     };
-  }, [activeFerritin, activeHemoglobin, activePlatelets]);
+  }, [
+    hbForModel, plateletsForModel, ferritinForModel,
+    vitals.age, vitals.gender, vitals.rbc, vitals.mcv, vitals.mch,
+    vitals.mchc, vitals.rdw, vitals.avgCycleDays,
+  ]);
 
   async function handleReportUpload(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -718,6 +807,88 @@ export default function PredictionsPage() {
                 </div>
               </div>
             </div>
+
+            {/* Real, per-patient inputs — replaces the former hard-coded profile */}
+            <div className="card bg-white p-6">
+              <div className="flex flex-col gap-2 border-b border-gray-50 pb-4 md:flex-row md:items-center md:justify-between">
+                <div className="flex items-center gap-2">
+                  <Activity size={18} className="text-red" />
+                  <h2 className="text-lg font-bold text-gray-800">
+                    {patientName ? `${patientName}'s latest blood report` : 'Your latest blood report'}
+                  </h2>
+                </div>
+                <span className="text-[11px] font-medium text-gray-400">Enter values from your CBC — every prediction below updates live.</span>
+              </div>
+              <div className="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+                <label className="flex flex-col gap-1">
+                  <span className="text-[11px] font-bold uppercase tracking-widest text-gray-400">Sex</span>
+                  <select
+                    value={vitals.gender}
+                    onChange={(e) => setVitals((v) => ({ ...v, gender: e.target.value as 'Male' | 'Female' }))}
+                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm font-semibold text-gray-800"
+                  >
+                    <option value="Female">Female</option>
+                    <option value="Male">Male</option>
+                  </select>
+                </label>
+                {([
+                  ['age', 'Age (yrs)', 1],
+                  ['hemoglobin', 'Hb (g/dL)', 0.1],
+                  ['rbc', 'RBC (10⁶/µL)', 0.01],
+                  ['mcv', 'MCV (fL)', 0.1],
+                  ['mch', 'MCH (pg)', 0.1],
+                  ['mchc', 'MCHC (g/dL)', 0.1],
+                  ['rdw', 'RDW (%)', 0.1],
+                  ['platelets', 'Platelets (10³/µL)', 1],
+                  ['ferritin', 'Ferritin (ng/mL)', 1],
+                  ['avgCycleDays', 'Cycle (days)', 1],
+                ] as [keyof PatientVitals, string, number][]).map(([key, label, step]) => (
+                  <label key={key} className="flex flex-col gap-1">
+                    <span className="text-[11px] font-bold uppercase tracking-widest text-gray-400">{label}</span>
+                    <input
+                      type="number"
+                      step={step}
+                      min={0}
+                      value={Number.isFinite(vitals[key] as number) ? (vitals[key] as number) : ''}
+                      onChange={(e) => setVitals((v) => ({ ...v, [key]: e.target.value === '' ? 0 : Number(e.target.value) }))}
+                      className="rounded-xl border border-gray-200 px-3 py-2 text-sm font-semibold text-gray-800 tabular-nums"
+                    />
+                  </label>
+                ))}
+              </div>
+              {ocrSummary ? (
+                <p className="mt-3 text-[11px] font-semibold text-green">✓ Hb / platelets / ferritin pre-filled from your uploaded report — review and complete the remaining fields.</p>
+              ) : null}
+            </div>
+
+            {/* Thalassaemia / haemoglobinopathy screen (ML, from the real CBC above) */}
+            {mlPrediction?.predictions?.thalassaemiaScreen ? (
+              <div className={`card p-6 border ${mlPrediction.predictions.thalassaemiaScreen.flagged ? 'border-red/30 bg-red-glow/40' : 'border-green/30 bg-green-bg/40'}`}>
+                <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                  <div className="flex items-start gap-3">
+                    <ShieldAlert size={22} className={mlPrediction.predictions.thalassaemiaScreen.flagged ? 'text-red' : 'text-green'} />
+                    <div>
+                      <h2 className="text-lg font-bold text-gray-800">Thalassaemia / haemoglobinopathy screen</h2>
+                      <p className="mt-1 max-w-xl text-sm text-gray-600">
+                        {mlPrediction.predictions.thalassaemiaScreen.flagged
+                          ? `CBC pattern suggests a possible ${mlPrediction.predictions.thalassaemiaScreen.likelyType ?? 'haemoglobinopathy'}. ${mlPrediction.predictions.thalassaemiaScreen.recommendation}.`
+                          : `${mlPrediction.predictions.thalassaemiaScreen.recommendation}.`}
+                      </p>
+                      <p className="mt-1 text-[11px] font-medium text-gray-400">{mlPrediction.predictions.thalassaemiaScreen.disclaimer}</p>
+                    </div>
+                  </div>
+                  <div className="flex flex-col items-end">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Screen risk</span>
+                    <span className={`text-3xl font-black tabular-nums ${mlPrediction.predictions.thalassaemiaScreen.flagged ? 'text-red' : 'text-green'}`}>
+                      {Math.round(mlPrediction.predictions.thalassaemiaScreen.riskProbability * 100)}%
+                    </span>
+                    <span className={`mt-1 inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-bold ${mlPrediction.predictions.thalassaemiaScreen.flagged ? 'bg-red text-white' : 'bg-green text-white'}`}>
+                      {mlPrediction.predictions.thalassaemiaScreen.flagged ? 'REFER FOR HPLC' : 'LOW RISK'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            ) : null}
 
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
               <div className="card bg-white p-6 lg:col-span-2">
@@ -849,28 +1020,35 @@ export default function PredictionsPage() {
                 </div>
 
                 <div className="mt-6 space-y-4">
-                  {rankedDonors.slice(0, 3).map((donor, index) => (
-                    <div key={donor.name} className="rounded-2xl border border-gray-100 bg-gray-50 p-4 transition-all hover:-translate-y-0.5 hover:bg-white hover:shadow-sm">
-                      <div className="flex items-center justify-between gap-4">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <p className="text-base font-bold text-gray-900">{index + 1}. {donor.name}</p>
-                            <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-black uppercase tracking-widest text-gray-500">{donor.bloodGroup}</span>
-                          </div>
-                          <p className="mt-1 text-sm text-gray-500">{donor.distanceKm.toFixed(1)} km • {donor.city} • {donor.lastDonation}</p>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-2xl font-black text-gray-900">{donor.score}%</p>
-                          <p className="text-xs font-bold uppercase tracking-widest text-gray-400">Match score</p>
-                        </div>
-                      </div>
-                      <div className="mt-3 grid grid-cols-3 gap-2 text-xs font-semibold text-gray-500">
-                        <span className="rounded-xl bg-white px-3 py-2 text-center">Compat {donor.compatibility}%</span>
-                        <span className="rounded-xl bg-white px-3 py-2 text-center">Avail {donor.availability}%</span>
-                        <span className="rounded-xl bg-white px-3 py-2 text-center">History {donor.donationHistory}%</span>
-                      </div>
+                  {rankedDonors.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-gray-200 bg-gray-50 p-6 text-center text-sm font-medium text-gray-500">
+                      No registered donors to match yet. As donors join, your best matches appear here.
                     </div>
-                  ))}
+                  ) : (
+                    rankedDonors.slice(0, 3).map((donor, index) => (
+                      <div key={`${donor.name}-${index}`} className="rounded-2xl border border-gray-100 bg-gray-50 p-4 transition-all hover:-translate-y-0.5 hover:bg-white hover:shadow-sm">
+                        <div className="flex items-center justify-between gap-4">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <p className="text-base font-bold text-gray-900">{index + 1}. {donor.name}</p>
+                              <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-black uppercase tracking-widest text-gray-500">{donor.bloodGroup}</span>
+                            </div>
+                            <p className="mt-1 text-sm text-gray-500">
+                              {donor.availability >= 100 ? 'Available now' : 'Availability on request'} • Last donated {donor.lastDonation}
+                            </p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-2xl font-black text-gray-900">{donor.score}%</p>
+                            <p className="text-xs font-bold uppercase tracking-widest text-gray-400">Match score</p>
+                          </div>
+                        </div>
+                        <div className="mt-3 grid grid-cols-2 gap-2 text-xs font-semibold text-gray-500">
+                          <span className="rounded-xl bg-white px-3 py-2 text-center">Avail {donor.availability}%</span>
+                          <span className="rounded-xl bg-white px-3 py-2 text-center">History {donor.donationHistory}%</span>
+                        </div>
+                      </div>
+                    ))
+                  )}
                 </div>
               </div>
 

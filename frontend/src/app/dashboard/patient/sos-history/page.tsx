@@ -1,7 +1,6 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { AlertCircle, CheckCircle2, Clock, MapPin, Phone, ChevronDown } from 'lucide-react';
-import { useRouter } from 'next/navigation';
+import { AlertCircle, CheckCircle2, Clock, MapPin, ChevronDown } from 'lucide-react';
 
 type SOSAlert = {
   _id: string;
@@ -12,12 +11,15 @@ type SOSAlert = {
   patientId?: { name?: string; bloodGroup?: string } | null;
 };
 
-const mockAlerts: SOSAlert[] = [
-  { _id: '1', bloodGroupRequired: 'B+', hospital: 'AIIMS Delhi', status: 'resolved', createdAt: '2025-03-25T10:30:00Z', patientId: { name: 'Rohan M.', bloodGroup: 'B+' } },
-  { _id: '2', bloodGroupRequired: 'B+', hospital: 'Safdarjung Hospital', status: 'resolved', createdAt: '2025-03-10T14:15:00Z', patientId: { name: 'Rohan M.', bloodGroup: 'B+' } },
-  { _id: '3', bloodGroupRequired: 'B+', hospital: 'AIIMS Delhi', status: 'accepted', createdAt: '2025-02-20T09:00:00Z', patientId: { name: 'Rohan M.', bloodGroup: 'B+' } },
-  { _id: '4', bloodGroupRequired: 'B+', hospital: 'Apollo Delhi', status: 'resolved', createdAt: '2025-01-15T11:45:00Z', patientId: { name: 'Rohan M.', bloodGroup: 'B+' } },
-];
+type ApiSOSAlert = {
+  _id?: unknown;
+  bloodGroupRequired?: unknown;
+  bloodGroup?: unknown;
+  hospital?: unknown;
+  status?: unknown;
+  createdAt?: unknown;
+  patientId?: { name?: string; bloodGroup?: string } | null;
+};
 
 const statusConfig = {
   pending: { label: 'Pending', chipClass: 'chip-amber', icon: <Clock size={12} /> },
@@ -38,41 +40,29 @@ function normalizeStatus(status: unknown): string {
 }
 
 export default function SOSHistoryPage() {
-  const router = useRouter();
-  const [alerts, setAlerts] = useState<SOSAlert[]>(mockAlerts);
+  const [alerts, setAlerts] = useState<SOSAlert[]>([]);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [accessError, setAccessError] = useState<string | null>(null);
 
   useEffect(() => {
-    const token = localStorage.getItem('token') || '';
-    if (!token) {
-      setAccessError('Please login to view SOS history.');
-      setLoading(false);
-      router.replace('/login');
-      return;
-    }
-
-    fetch('/api/sos', {
-      headers: { Authorization: `Bearer ${token}` },
-    })
+    // Auth via the httpOnly session cookie (sent automatically same-origin).
+    fetch('/api/sos', { credentials: 'include' })
       .then(async (res) => {
         if (res.status === 401) {
           setAccessError('Session expired. Please login again.');
-          localStorage.removeItem('token');
-          router.replace('/login');
           return [];
         }
         return res.json();
       })
       .then(data => {
         if (Array.isArray(data) && data.length > 0) {
-          const normalizedAlerts: SOSAlert[] = data.map((item: any) => ({
+          const normalizedAlerts: SOSAlert[] = (data as ApiSOSAlert[]).map((item) => ({
             _id: String(item._id),
             bloodGroupRequired: String(item.bloodGroupRequired || item.bloodGroup || item.patientId?.bloodGroup || 'N/A'),
             hospital: String(item.hospital || 'Unknown Hospital'),
             status: normalizeStatus(item.status),
-            createdAt: item.createdAt || new Date().toISOString(),
+            createdAt: typeof item.createdAt === 'string' ? item.createdAt : new Date().toISOString(),
             patientId: item.patientId || null,
           }));
           setAlerts(normalizedAlerts);
@@ -80,7 +70,7 @@ export default function SOSHistoryPage() {
       })
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, [router]);
+  }, []);
 
   const stats = {
     total: alerts.length,

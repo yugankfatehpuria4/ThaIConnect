@@ -10,7 +10,7 @@ export default function RegisterPage() {
     email: '',
     phone: '',
     password: '',
-    role: 'patient' as 'patient' | 'donor' | 'admin',
+    role: 'patient' as 'patient' | 'donor',
   });
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -24,6 +24,7 @@ export default function RegisterPage() {
       const res = await fetch('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include', // receive the httpOnly session cookie
         body: JSON.stringify(formData),
       });
 
@@ -33,10 +34,10 @@ export default function RegisterPage() {
       }
 
       const data = await res.json();
-      localStorage.setItem('token', data.token);
+      // JWT is set as an httpOnly cookie by the server; keep only display info.
       localStorage.setItem('role', data.user.role);
       localStorage.setItem('user', JSON.stringify(data.user));
-      
+
       // Navigate to the user's new dashboard
       router.replace(`/dashboard/${data.user.role}`);
     } catch (err) {
@@ -140,7 +141,6 @@ export default function RegisterPage() {
             >
               <option value="patient">Patient (Looking for donors)</option>
               <option value="donor">Blood Donor (Willing to donate)</option>
-              <option value="admin">Administrator (System mangement)</option>
             </select>
           </div>
 

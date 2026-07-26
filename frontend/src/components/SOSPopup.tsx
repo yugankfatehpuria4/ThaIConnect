@@ -1,28 +1,73 @@
 'use client';
 import { motion, AnimatePresence } from 'framer-motion';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSocket } from '@/context/SocketContext';
+import { useToast } from '@/context/ToastContext';
 import { AlertTriangle, UserCircle2, MapPin } from 'lucide-react';
+
+type SOSPayload = {
+  sosId: string;
+  patientName?: string;
+  bloodGroup?: string;
+  hospital?: string;
+};
+
+function isSOSPayload(value: unknown): value is SOSPayload {
+  return Boolean(value && typeof value === 'object' && typeof (value as SOSPayload).sosId === 'string');
+}
+
+// Urgent two-tone beep generated in-browser (no audio file dependency, so it
+// never silently fails on a missing /alarm.mp3).
+function playAlertBeep() {
+  try {
+    const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const beep = (startAt: number, freq: number) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime + startAt);
+      gain.gain.exponentialRampToValueAtTime(0.35, ctx.currentTime + startAt + 0.04);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + startAt + 0.35);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(ctx.currentTime + startAt);
+      osc.stop(ctx.currentTime + startAt + 0.36);
+    };
+    beep(0, 880);
+    beep(0.4, 988);
+  } catch {
+    /* audio not available — non-fatal */
+  }
+}
 
 export default function SOSPopup() {
   const { socket } = useSocket();
-  const [sosData, setSosData] = useState<any | null>(null);
+  const { showToast } = useToast();
+  const [sosData, setSosData] = useState<SOSPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [timeLeft, setTimeLeft] = useState(30);
+  const [error, setError] = useState<string | null>(null);
+  const activeAlertRef = useRef(false);
+
+  useEffect(() => {
+    activeAlertRef.current = Boolean(sosData);
+  }, [sosData]);
 
   useEffect(() => {
     if (!socket) return;
 
-    const handleAlert = (data: any) => {
+    const handleAlert = (data: unknown) => {
+      if (!isSOSPayload(data)) return;
       // Only show if we don't already have an active unhandled alert
-      if (!sosData) {
+      if (!activeAlertRef.current) {
+        activeAlertRef.current = true;
         setSosData(data);
         setTimeLeft(30);
-        // Ensure browser can play audio if interacted with
-        try {
-          const audio = new Audio('/alarm.mp3');
-          audio.play().catch(e => console.warn('Audio auto-play prevented', e));
-        } catch(e) {}
+        setError(null);
+        playAlertBeep();
       }
     };
 
@@ -31,7 +76,43 @@ export default function SOSPopup() {
     return () => {
       socket.off('sos-alert', handleAlert);
     };
-  }, [socket, sosData]);
+  }, [socket]);
+
+  const handleResponse = useCallback(async (status: 'accepted' | 'rejected') => {
+    if (!sosData) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/sos/respond', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include', // auth via the httpOnly session cookie
+        body: JSON.stringify({ sosId: sosData.sosId, response: status }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || 'Failed to respond. Please try again.');
+        return;
+      }
+
+      // Only clear on success
+      activeAlertRef.current = false;
+      setSosData(null);
+      setError(null);
+
+      // Booking confirmation to the donor who just accepted (previously they got
+      // nothing in-app — the confirmation email is skipped unless SMTP is set up).
+      if (status === 'accepted') {
+        showToast('✅ You accepted the request. The patient has been notified — thank you for saving a life! 🩸', 'success', 8000);
+      }
+    } catch (err) {
+      console.error('Failed to respond to SOS', err);
+      setError('Network error. Please check your connection.');
+    } finally {
+      setLoading(false);
+    }
+  }, [sosData, showToast]);
 
   useEffect(() => {
     let timer: NodeJS.Timeout;
@@ -42,29 +123,7 @@ export default function SOSPopup() {
       handleResponse('rejected');
     }
     return () => clearTimeout(timer);
-  }, [sosData, timeLeft]);
-
-  const handleResponse = async (status: 'accepted' | 'rejected') => {
-    if (!sosData) return;
-    setLoading(true);
-    try {
-      const token = localStorage.getItem('token');
-      await fetch('/api/sos/respond', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ sosId: sosData.sosId, response: status })
-      });
-      // Assuming success
-      setSosData(null);
-    } catch (err) {
-      console.error('Failed to respond to SOS', err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  }, [handleResponse, sosData, timeLeft]);
 
   return (
     <AnimatePresence>
@@ -115,18 +174,24 @@ export default function SOSPopup() {
                 </div>
               </div>
 
+              {error && (
+                <div className="bg-red/20 border border-red/40 text-red-300 text-sm px-4 py-2 rounded-xl">
+                  {error}
+                </div>
+              )}
+
               <div className="flex gap-4 pt-2">
                 <button
                   onClick={() => handleResponse('accepted')}
                   disabled={loading}
-                  className="flex-1 bg-gradient-to-r from-red-600 to-red hover:from-red-500 hover:to-red-400 text-white font-bold py-4 rounded-2xl shadow-xl transition-all shadow-red/20 active:scale-95"
+                  className="flex-1 bg-gradient-to-r from-red-600 to-red hover:from-red-500 hover:to-red-400 text-white font-bold py-4 rounded-2xl shadow-xl transition-all shadow-red/20 active:scale-95 disabled:opacity-60"
                 >
                   {loading ? 'Confirming...' : 'ACCEPT NOW'}
                 </button>
                 <button
                   onClick={() => handleResponse('rejected')}
                   disabled={loading}
-                  className="bg-white/5 hover:bg-white/10 border border-white/10 text-white/60 font-bold px-6 py-4 rounded-2xl transition-all active:scale-95 text-sm uppercase tracking-wider"
+                  className="bg-white/5 hover:bg-white/10 border border-white/10 text-white/60 font-bold px-6 py-4 rounded-2xl transition-all active:scale-95 text-sm uppercase tracking-wider disabled:opacity-60"
                 >
                   Ignore ({timeLeft}s)
                 </button>

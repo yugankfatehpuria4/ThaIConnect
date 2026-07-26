@@ -26,4 +26,7 @@ const donationSchema: Schema = new Schema({
   verified: { type: Boolean, default: false }
 }, { timestamps: true });
 
+// Donation history / exports query by donor, newest first.
+donationSchema.index({ donorId: 1, date: -1 });
+
 export default mongoose.model<IDonation>('Donation', donationSchema);
