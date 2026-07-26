@@ -34,7 +34,8 @@ Three services + a database:
      as the backend), `BACKEND_ORIGINS` = the backend's Render URL.
 3. Deploy. Verify:
    - Backend `GET /` → `{"status":"ok","db":"connected"}` (503 means Mongo isn't reachable).
-   - AI `GET /api/ml/health` (needs the `X-API-Key` header) → all models `true`.
+   - AI `GET /api/ml/health` (public — no header) → all models `true`. This is
+     also the Render health-check path, so it must stay unauthenticated.
 
 > The AI service runs `gunicorn` (already in `requirements.txt`). XGBoost needs
 > `libgomp`, which is present on Render's Linux Python image — no extra step.

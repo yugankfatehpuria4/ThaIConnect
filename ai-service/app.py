@@ -256,8 +256,10 @@ def screen_thalassaemia(model, thal_input):
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
 @app.route('/api/ml/health', methods=['GET'])
-@require_api_key
 def ml_health():
+    # Public liveness/readiness endpoint — no API key. The platform health check
+    # (Render) and load balancers must be able to hit this unauthenticated. The
+    # payload only reports whether model files exist, which is not sensitive.
     return jsonify({'models': {k: v.exists() for k, v in MODEL_FILES.items()}, 'dataset_builder': DATASET_SCRIPT.exists()})
 
 
