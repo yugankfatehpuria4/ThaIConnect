@@ -61,6 +61,7 @@ export default function PatientDashboard() {
   const [userLocation, setUserLocation] = useState<{lat: number, lng: number} | null>(null);
   const [donors, setDonors] = useState<DonorMatch[]>([]);
   const [bloodFilter, setBloodFilter] = useState('all');
+  const [radiusKm, setRadiusKm] = useState(750);
   const [searchQuery, setSearchQuery] = useState('');
   const [mlPrediction, setMlPrediction] = useState<DashboardMlPrediction | null>(null);
   // const [sosAccepts, setSosAccepts] = useState<SosAcceptedPayload[]>([]);
@@ -233,10 +234,22 @@ export default function PatientDashboard() {
     const bloodMatches = bloodFilter === 'all' || donor.bloodGroup === bloodFilter;
     const query = searchQuery.trim().toLowerCase();
     const searchMatches = query.length === 0 || donor.name.toLowerCase().includes(query);
-    return bloodMatches && searchMatches;
+    // Distance filter: keep donors within the selected radius. Donors with an
+    // unknown/unparseable distance are kept (don't hide a real match on missing data).
+    const dist = Number(donor.distance);
+    const distanceMatches = !Number.isFinite(dist) || dist <= radiusKm;
+    return bloodMatches && searchMatches && distanceMatches;
   });
 
-  const donorBloodGroups = ['all', ...new Set(donors.map((entry) => entry.bloodGroup).filter(Boolean))] as string[];
+  // Offer every standard ABO/Rh category as a filter option, unioned with any
+  // groups actually present in the donor data — so all categories are selectable.
+  const STANDARD_BLOOD_GROUPS = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
+  const donorBloodGroups = [
+    'all',
+    ...new Set([...STANDARD_BLOOD_GROUPS, ...donors.map((entry) => entry.bloodGroup).filter(Boolean) as string[]]),
+  ];
+  // Selectable search radii, in km — up to 750 km.
+  const RADIUS_OPTIONS = [10, 25, 50, 100, 250, 500, 750];
 
   const diffDays = timeline ? Math.ceil((new Date(timeline.nextTransfusion).getTime() - DASHBOARD_RENDER_REFERENCE_TIME) / (1000 * 3600 * 24)) : 0;
   const daysLabel = diffDays >= 0 ? `${diffDays} days` : `${Math.abs(diffDays)} days overdue`;
@@ -273,7 +286,11 @@ export default function PatientDashboard() {
                 <option key={group} value={group}>{group === 'all' ? 'All Groups' : group}</option>
               ))}
             </select>
-            <select className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs text-gray-600 outline-none"><option>Within 10 km</option></select>
+            <select value={radiusKm} onChange={(e) => setRadiusKm(Number(e.target.value))} className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs text-gray-600 outline-none">
+              {RADIUS_OPTIONS.map((km) => (
+                <option key={km} value={km}>Within {km} km</option>
+              ))}
+            </select>
             <input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search donors..." className="flex-1 border border-gray-200 rounded-lg px-3 py-1.5 text-xs outline-none focus:border-red transition-colors" />
           </div>
           <div className="flex flex-col gap-2">
