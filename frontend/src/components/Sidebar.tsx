@@ -172,7 +172,7 @@ export default function Sidebar({ role, mobileOpen = false, onCloseAction }: Sid
     localStorage.removeItem('role');
     localStorage.removeItem('user');
     localStorage.removeItem('patientVitals');
-    router.replace('/login');
+    router.replace('/');
   };
 
   const roleLabel = userSnapshot.role === 'patient' ? 'Patient' : userSnapshot.role === 'donor' ? 'Donor' : 'Administrator';

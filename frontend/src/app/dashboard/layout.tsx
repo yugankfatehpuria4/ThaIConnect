@@ -37,7 +37,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     const userRole = isUserRole(localRole) ? localRole : null;
 
     if (!userRole) {
-      router.replace('/login');
+      // No session (e.g. after logout, or a reload with the cookie cleared) —
+      // send the user to the public landing page.
+      router.replace('/');
       return;
     }
 
